@@ -28,7 +28,7 @@ make sure your gpx file is also UTC
 run
 
 ```
-$ python process.py -z <timezone> -d /path/to/pics all /path/to/gpx/*.gpx
+$ photo_process -z <timezone> -d /path/to/pics all /path/to/gpx/*.gpx
 ```
 
 this will geotag the pictures, shift times to the new timezone and rename the files.
