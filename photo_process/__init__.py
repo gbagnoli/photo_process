@@ -252,5 +252,5 @@ def all(ctx: click.Context, gps_files: Optional[Sequence[str]]) -> None:
     ctx.invoke(rename)
 
 
-if __name__ == "__main__":
+def main():
     cli(obj=Config())
