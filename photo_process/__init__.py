@@ -204,7 +204,8 @@ def rename(ctx: click.Context) -> None:
 
 @cli.command()
 @click.pass_context
-def shift(ctx: click.Context) -> None:
+def time(ctx: click.Context) -> None:
+    """ set time and timezone on pictures """
     dst = 0 if not ctx.obj.timezone_dst else 1
     shift = ctx.obj.timezone[1:]
     direction = ctx.obj.timezone[0]
@@ -244,11 +245,38 @@ def geotag(ctx: click.Context, gps_files: Optional[Sequence[str]]) -> None:
 
 
 @cli.command()
+@click.argument("by", nargs=1)
+@click.argument("images", nargs=-1, type=click.Path(exists=True, dir_okay=True))
+@click.pass_context
+def shift(ctx: click.Context, by: str, images: Optional[Sequence[str]]) -> None:
+    """ shift photos """
+    if not by:
+        ctx.fail("empty shift pattern")
+
+    if not images:
+        ctx.fail("No images provided")
+
+    if by[0] not in ("+", "-"):
+        direction = "+"
+    else:
+        direction = by[0]
+        by = by[1:]
+
+    run(
+        "exiftool",
+        f"-AllDates{direction}=0:0:0 {by}:0",
+        "-overwrite_original",
+        *[i for i in images],
+    )
+    clean(ctx)
+
+
+@cli.command()
 @click.argument("gps_files", nargs=-1, type=click.Path(exists=True, dir_okay=False))
 @click.pass_context
 def all(ctx: click.Context, gps_files: Optional[Sequence[str]]) -> None:
     ctx.forward(geotag)
-    ctx.invoke(shift)
+    ctx.invoke(time)
     ctx.invoke(rename)
 
 
