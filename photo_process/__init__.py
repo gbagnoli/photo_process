@@ -204,7 +204,7 @@ def rename(ctx: click.Context) -> None:
 
 @cli.command()
 @click.pass_context
-def time(ctx: click.Context) -> None:
+def set_time(ctx: click.Context) -> None:
     """ set time and timezone on pictures """
     dst = 0 if not ctx.obj.timezone_dst else 1
     shift = ctx.obj.timezone[1:]
@@ -276,7 +276,7 @@ def shift(ctx: click.Context, by: str, images: Optional[Sequence[str]]) -> None:
 @click.pass_context
 def all(ctx: click.Context, gps_files: Optional[Sequence[str]]) -> None:
     ctx.forward(geotag)
-    ctx.invoke(time)
+    ctx.invoke(set_time)
     ctx.invoke(rename)
 
 
