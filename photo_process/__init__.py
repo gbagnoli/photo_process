@@ -24,6 +24,7 @@ TZ_CITIES = {
     "Rome": (19, "+01:00"),
     "San Francisco": (30, "-08:00"),
     "Santiago": (25, "-04:00"),
+    "Singapore": (7, "+08:00"),
     "US/Central": (28, "-06:00"),
     "US/Eastern": (27, "-05:00"),
     "US/Pacific": (30, "-08:00"),
