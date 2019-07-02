@@ -207,7 +207,7 @@ def rename(ctx: click.Context) -> None:
 @click.pass_context
 def set_time(ctx: click.Context) -> None:
     """ set time and timezone on pictures """
-    dst = 0 if not ctx.obj.timezone_dst else 1
+    dst = 0 if not ctx.obj.timezone_dst else 60
     shift = ctx.obj.timezone[1:]
     direction = ctx.obj.timezone[0]
     run(
@@ -215,7 +215,7 @@ def set_time(ctx: click.Context) -> None:
         f"-AllDates{direction}=0:0:0 {shift}:0",
         f"-TimeZone={ctx.obj.timezone}",
         f"-TimeZoneCity#={ctx.obj.timezone_id}",
-        f"-DaylightSavings=#{dst}",
+        f"-DaylightSavings#={dst}",
         "-overwrite_original",
         str(ctx.obj.images_dir.resolve()),
     )
