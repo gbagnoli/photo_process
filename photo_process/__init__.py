@@ -240,7 +240,7 @@ def geotag(ctx: click.Context, gps_files: Optional[Sequence[str]]) -> None:
     if len(gps_paths) > 1:
         gpx = merge_gpx(ctx, gps_paths)
     else:
-        gpx = gps_paths[0]
+        gpx = ctx.obj.images_dir / gps_paths[0]
 
     geotag_images(ctx, gpx)
     clean(ctx)
