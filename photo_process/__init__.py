@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import sys
 from pathlib import Path
 from typing import List, Optional, Sequence
 
@@ -180,16 +181,22 @@ def rename(ctx: click.Context) -> None:
         up_ext = suffix.upper()
 
         if ctx.obj.images_dir.glob(f"*.{up_ext}"):
-            run(
-                "rename",
-                f"s/.{up_ext}$/.{suffix}_/",
-                f"{ctx.obj.images_dir}/*.#{up_ext}",
-            )
-            run(
-                "rename",
-                f"s/.{suffix}_$/.{suffix}/",
-                f"{ctx.obj.images_dir}/*.#{suffix}_",
-            )
+            if sys.platform.startswith("darwin"):
+                run(
+                    "rename",
+                    f"s/.{up_ext}$/.{suffix}_/",
+                    f"{ctx.obj.images_dir}/*.#{up_ext}",
+                )
+                run(
+                    "rename",
+                    f"s/.{suffix}_$/.{suffix}/",
+                    f"{ctx.obj.images_dir}/*.#{suffix}_",
+                )
+            else:
+                run("rename",
+                    f"s/.{up_ext}$/.{suffix}/",
+                    f"*.{up_ext}",
+                    _cwd=ctx.obj.images_dir)
 
     run("find", dir_, "-type", "f", "-exec", "chmod", "0644", "{}", "+")
 
