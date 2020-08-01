@@ -193,10 +193,12 @@ def rename(ctx: click.Context) -> None:
                     f"{ctx.obj.images_dir}/*.#{suffix}_",
                 )
             else:
-                run("rename",
+                run(
+                    "rename",
                     f"s/.{up_ext}$/.{suffix}/",
                     f"*.{up_ext}",
-                    _cwd=ctx.obj.images_dir)
+                    _cwd=ctx.obj.images_dir,
+                )
 
     run("find", dir_, "-type", "f", "-exec", "chmod", "0644", "{}", "+")
 
