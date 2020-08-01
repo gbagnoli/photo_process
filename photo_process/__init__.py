@@ -223,6 +223,9 @@ def set_time(ctx: click.Context) -> None:
         f"-AllDates{direction}=0:0:0 {shift}:0",
         f"-TimeZone={ctx.obj.timezone}",
         f"-TimeZoneCity#={ctx.obj.timezone_id}",
+        f"-OffSetTime={ctx.obj.timezone}",
+        f"-OffSetTimeOriginal={ctx.obj.timezone}",
+        f"-OffSetTimeDigitized={ctx.obj.timezone}",
         f"-DaylightSavings#={dst}",
         "-overwrite_original",
         str(ctx.obj.images_dir.resolve()),
@@ -254,11 +257,14 @@ def geotag(ctx: click.Context, gps_files: Optional[Sequence[str]]) -> None:
 
 
 @cli.command()
+@click.option("--reset-tz/--no-reset-tz", default=False)
 @click.argument("by", nargs=1)
 @click.argument("images", nargs=-1, type=click.Path(exists=True, dir_okay=True))
 @click.pass_context
-def shift(ctx: click.Context, by: str, images: Optional[Sequence[str]]) -> None:
-    """ shift photos """
+def shift(
+    ctx: click.Context, reset_tz: bool, by: str, images: Optional[Sequence[str]]
+) -> None:
+    """ shift photos - this will also clear out timezones"""
     if not by:
         ctx.fail("empty shift pattern")
 
@@ -271,11 +277,23 @@ def shift(ctx: click.Context, by: str, images: Optional[Sequence[str]]) -> None:
         direction = by[0]
         by = by[1:]
 
-    run(
-        "exiftool",
+    args = [
         f"-AllDates{direction}=0:0:0 {by}:0",
         "-overwrite_original",
-        *[i for i in images],
+    ]
+
+    if reset_tz:
+        args.extend(
+            [
+                "-OffSetTime=",
+                "-OffSetTimeOriginal=",
+                "-OffSetTimeDigitized=",
+                "-Timezone=" "-TimezoneCity=",
+            ]
+        )
+
+    run(
+        "exiftool", *args, *[i for i in images],
     )
     clean(ctx)
 
