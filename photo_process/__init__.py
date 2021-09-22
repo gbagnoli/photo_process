@@ -3,6 +3,7 @@
 import os
 import shutil
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Sequence
 
@@ -10,8 +11,6 @@ import click
 import gpxpy
 import maya
 import sh
-
-from dataclasses import dataclass, field
 
 # not an exaustive list
 # see https://sno.phy.queensu.ca/~phil/exiftool/TagNames/Canon.html
@@ -44,7 +43,7 @@ class Config:
 
 
 def run(command_str, *args, **kwargs):
-    command = getattr(sh, command_str)
+    command = sh.Command(command_str)
     baked = command.bake(*args, **kwargs)
     click.echo(f"Running: {baked}")
 
@@ -129,9 +128,7 @@ def clean(ctx: click.Context) -> None:
     "-d",
     type=click.Path(writable=True, file_okay=False, exists=True, resolve_path=True),
 )
-@click.option(
-    "--timezone", "-z", default="Europe/Dublin", type=click.Choice(TZ_CITIES.keys())
-)
+@click.option("--timezone", "-z", default="Dublin", type=click.Choice(TZ_CITIES.keys()))
 @click.option("--dst/--no-dst", default=False, help="Set if timezone in DST")
 @click.option(
     "--timerange",
@@ -174,7 +171,7 @@ def cli(
 @cli.command()
 @click.pass_context
 def rename(ctx: click.Context) -> None:
-    """ Rename images using their date and time """
+    """Rename images using their date and time"""
     dir_ = str(ctx.obj.images_dir.resolve())
 
     for suffix in ctx.obj.suffixes:
@@ -216,7 +213,7 @@ def rename(ctx: click.Context) -> None:
 @cli.command()
 @click.pass_context
 def set_time(ctx: click.Context) -> None:
-    """ set time and timezone on pictures """
+    """set time and timezone on pictures"""
     dst = 0 if not ctx.obj.timezone_dst else 60
     shift = ctx.obj.timezone[1:]
     direction = ctx.obj.timezone[0]
@@ -239,7 +236,7 @@ def set_time(ctx: click.Context) -> None:
 @click.argument("gps_files", nargs=-1, type=click.Path(exists=True, dir_okay=False))
 @click.pass_context
 def geotag(ctx: click.Context, gps_files: Optional[Sequence[str]]) -> None:
-    """ geotag images using gpx files """
+    """geotag images using gpx files"""
 
     if not gps_files:
         ctx.fail("No gps files provided")
@@ -266,7 +263,7 @@ def geotag(ctx: click.Context, gps_files: Optional[Sequence[str]]) -> None:
 def shift(
     ctx: click.Context, reset_tz: bool, by: str, images: Optional[Sequence[str]]
 ) -> None:
-    """ shift photos - this will also clear out timezones"""
+    """shift photos - this will also clear out timezones"""
     if not by:
         ctx.fail("empty shift pattern")
 
@@ -295,7 +292,70 @@ def shift(
         )
 
     run(
-        "exiftool", *args, *[i for i in images],
+        "exiftool",
+        *args,
+        *[i for i in images],
+    )
+    clean(ctx)
+
+
+def get_coordinates_args(
+    lat: str, log: str, latitude_ref: str, longitude_ref: str
+) -> Optional[List[str]]:
+    lat = lat.rstrip(",")
+    try:
+        float(lat)
+        float(log)
+    except ValueError as e:
+        return None
+
+    if lat.startswith("-"):
+        latitude_ref = "S"
+        lat = lat.lstrip("-")
+    if log.startswith("-"):
+        longitude_ref = "W"
+        log = log.lstrip("-")
+
+    args = [
+        f"-gpslatitude={lat}",
+        f"-gpslongitude={log}",
+    ]
+
+    if latitude_ref:
+        args.append(f"-gpslatituderef={latitude_ref}")
+    if longitude_ref:
+        args.append(f"-gpslongituderef={longitude_ref}")
+    return args
+
+
+@cli.command()
+@click.option("--latitude-ref", default="N")
+@click.option("--longitude-ref", default="E")
+@click.argument("lat", nargs=1)
+@click.argument("log", nargs=1)
+@click.argument("images", nargs=-1)
+@click.pass_context
+def set_gps(
+    ctx: click.Context,
+    latitude_ref: Optional[str],
+    longitude_ref: Optional[str],
+    lat: str,
+    log: str,
+    images: Optional[Sequence[str]],
+) -> None:
+    """set GPS coordinates on images"""
+
+    if not images:
+        ctx.fail("No images provided")
+
+    args = get_coordinates_args(lat, log, latitude_ref, longitude_ref)
+    if not args:
+        ctx.fail("Invalid coordinates")
+
+    run(
+        "exiftool",
+        *args,
+        *[i for i in images],
     )
     clean(ctx)
 
