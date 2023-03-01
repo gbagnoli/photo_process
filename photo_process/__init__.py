@@ -65,6 +65,7 @@ def gpx_name(_ctx: click.Context, gps_file: Path) -> Path:
     track_name = gpx.tracks[0].name
     track_time = maya.parse(gpx.time).datetime().strftime("%Y-%m-%d.%H:%M:%S")
     name = f"{track_time}_{track_name}"
+    name = name.replace("/", "-")
 
     return gps_file.parent / f"{name}.gpx"
 
