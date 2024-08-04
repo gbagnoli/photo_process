@@ -12,6 +12,7 @@ pylint = "*"
 mypy = "*"
 
 [packages]
+setuptools = "*"
 sh = "*"
 click = "*"
 gpxpy = "*"
@@ -19,7 +20,7 @@ maya = "*"
 photoprocess = {editable = true,path = "."}
 
 [requires]
-python_version = "3.9"
+python_version = "3.12"
 
 [pipenv]
 allow_prereleases = true
