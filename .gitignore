@@ -3,4 +3,4 @@ __pycache__
 .mypy_cache
 .python-version
 build/
-PhotoProcess.egg-info/
+photo_process.egg-info/
