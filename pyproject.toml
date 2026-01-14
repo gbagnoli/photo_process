@@ -1,7 +1,7 @@
 [project]
 name = "photo_process"
 version = "0.0.1"
-requires-python = "~=3.13.0"
+requires-python = ">=3.13"
 license = "MIT"
 description="simple scripts to process photos"
 dependencies = [
