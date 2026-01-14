@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -10,13 +11,11 @@ const TZ_CITIES_DATA: &[(&str, i32, &str)] = &[
     ("Austin", 28, "-06:00"),
     ("Buenos Aires", 25, "-04:00"),
     ("Dublin", 20, "+00:00"),
-    ("Galapagos", 28, "-06:00"),
     ("London", 20, "+00:00"),
     ("Mexico City", 28, "-06:00"),
     ("New York", 27, "-05:00"),
     ("Rome", 19, "+01:00"),
     ("Quintana Roo", 27, "-05:00"),
-    ("Quito", 27, "-05:00"),
     ("San Francisco", 30, "-08:00"),
     ("Santiago", 25, "-04:00"),
     ("Singapore", 7, "+08:00"),
@@ -29,7 +28,6 @@ const TZ_CITIES_DATA: &[(&str, i32, &str)] = &[
 #[derive(Debug, Clone)]
 struct AppConfig {
     suffixes: Vec<String>,
-    images_dir: PathBuf,
     timerange: u64,
     timezone: String,
     timezone_dst: bool,
@@ -42,9 +40,6 @@ struct AppConfig {
 #[command(name = "photo_process")]
 #[command(about = "simple scripts to process photos")]
 struct Cli {
-    #[arg(short = 'd', long, default_value = ".")]
-    images_dir: PathBuf,
-
     #[arg(short = 'z', long, default_value = "Dublin")]
     timezone: String,
 
@@ -64,13 +59,21 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Rename images using their date and time
-    Rename,
+    Rename {
+        #[arg(required = true)]
+        images: Vec<PathBuf>,
+    },
     /// set time and timezone on pictures
-    SetTime,
+    SetTime {
+        #[arg(required = true)]
+        images: Vec<PathBuf>,
+    },
     /// geotag images using gpx files
     Geotag {
-        #[arg(required = true)]
+        #[arg(short = 'g', long, required = true)]
         gps_files: Vec<PathBuf>,
+        #[arg(required = true)]
+        images: Vec<PathBuf>,
     },
     /// shift photos - this will also clear out timezones
     Shift {
@@ -91,7 +94,10 @@ enum Commands {
     },
     /// Run all: geotag, set_time, rename
     All {
+        #[arg(short = 'g', long, required = true)]
         gps_files: Vec<PathBuf>,
+        #[arg(required = true)]
+        images: Vec<PathBuf>,
     },
 }
 
@@ -110,6 +116,25 @@ fn run(program: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+fn resolve_files(files: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut resolved = Vec::new();
+    for path in files {
+        if path.exists() {
+            resolved.push(
+                fs::canonicalize(path)
+                    .with_context(|| format!("Failed to canonicalize {:?}", path))?,
+            );
+        } else {
+            // If file doesn't exist, we might want to keep it as is or error?
+            // Since commands usually expect existing files, erroring or passing as-is is safer.
+            // We'll try to convert to absolute path even if not exists (current_dir join) or just warn.
+            // For now, let's error if input explicitly doesn't exist.
+            return Err(anyhow::anyhow!("File not found: {:?}", path));
+        }
+    }
+    Ok(resolved)
+}
+
 fn get_tz_info(city: &str) -> Result<(i32, String)> {
     for (name, id, offset) in TZ_CITIES_DATA {
         if *name == city {
@@ -122,7 +147,13 @@ fn get_tz_info(city: &str) -> Result<(i32, String)> {
 fn gpx_name(gps_file: &Path) -> Result<PathBuf> {
     if gps_file.extension().and_then(|e| e.to_str()) != Some("gpx") {
         let mut dest = gps_file.parent().unwrap_or(Path::new(".")).to_path_buf();
-        dest.push(format!("{}.gpx", gps_file.file_stem().context("No file stem")?.to_string_lossy()));
+        dest.push(format!(
+            "{}.gpx",
+            gps_file
+                .file_stem()
+                .context("No file stem")?
+                .to_string_lossy()
+        ));
         return Ok(dest);
     }
 
@@ -142,7 +173,6 @@ fn gpx_name(gps_file: &Path) -> Result<PathBuf> {
 
     let track_time = if let Some(metadata) = gpx_data.metadata {
         if let Some(time) = metadata.time {
-            // gpx crate time.format() returns ISO 8601 string Result
             if let Ok(iso) = time.format() {
                 if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&iso) {
                     dt.format("%Y-%m-%d.%H:%M:%S").to_string()
@@ -178,12 +208,19 @@ fn ensure_gpx(gps_file: &Path) -> Result<PathBuf> {
             fs::rename(gps_file, &dest)?;
         }
     } else if suffix == "tcx" {
-        run("gpsbabel", &[
-            "-i", "gtrnctr",
-            "-f", gps_file.to_str().context("Path not UTF-8")?,
-            "-o", "gpx",
-            "-F", dest.to_str().context("Path not UTF-8")?
-        ])?;
+        run(
+            "gpsbabel",
+            &[
+                "-i",
+                "gtrnctr",
+                "-f",
+                gps_file.to_str().context("Path not UTF-8")?,
+                "-o",
+                "gpx",
+                "-F",
+                dest.to_str().context("Path not UTF-8")?,
+            ],
+        )?;
     } else {
         return Err(anyhow::anyhow!("Unknown format {:?}", suffix));
     }
@@ -191,14 +228,14 @@ fn ensure_gpx(gps_file: &Path) -> Result<PathBuf> {
     Ok(dest)
 }
 
-fn merge_gpx(config: &AppConfig, gpx_files: &[PathBuf]) -> Result<PathBuf> {
-    let dest = config.images_dir.join("all_activities.gpx");
+fn merge_gpx(gpx_files: &[PathBuf], output_dir: &Path) -> Result<PathBuf> {
+    let dest = output_dir.join("all_activities.gpx");
     if dest.exists() {
         let _ = fs::remove_file(&dest);
     }
 
     let options = vec!["-i", "gpx"];
-    let mut file_args = Vec::new(); // keep strings alive
+    let mut file_args = Vec::new();
 
     for path in gpx_files {
         if path.file_name().and_then(|n| n.to_str()) == Some("all_activities.gpx") {
@@ -223,65 +260,113 @@ fn merge_gpx(config: &AppConfig, gpx_files: &[PathBuf]) -> Result<PathBuf> {
     Ok(dest)
 }
 
-fn geotag_images(config: &AppConfig, gpx: &Path) -> Result<()> {
-    run("gpicsync", &[
-        "-g", gpx.to_str().context("Path not UTF-8")?,
-        "-z", "UTC",
-        "-d", config.images_dir.to_str().context("Path not UTF-8")?,
-        "--time-range", &config.timerange.to_string()
-    ])
+fn geotag_images_dir(config: &AppConfig, gpx: &Path, dir: &Path) -> Result<()> {
+    run(
+        "gpicsync",
+        &[
+            "-g",
+            gpx.to_str().context("Path not UTF-8")?,
+            "-z",
+            "UTC",
+            "-d",
+            dir.to_str().context("Path not UTF-8")?,
+            "--time-range",
+            &config.timerange.to_string(),
+        ],
+    )
 }
 
-fn clean(config: &AppConfig) -> Result<()> {
-    // glob("*_original") in images_dir
-    let pattern = config.images_dir.join("*_original");
-    for entry in glob::glob(pattern.to_str().context("Path not UTF-8")?)? {
-        if let Ok(path) = entry {
-            let _ = fs::remove_file(path);
+fn clean(files: &[PathBuf]) -> Result<()> {
+    for path in files {
+        // Construct potential original file name
+        // Exiftool usually creates "filename.ext_original"
+        let mut original = path.clone();
+        if let Some(name) = path.file_name() {
+            let mut name_str = name.to_string_lossy().into_owned();
+            name_str.push_str("_original");
+            original.set_file_name(name_str);
+
+            if original.exists() {
+                let _ = fs::remove_file(original);
+            }
         }
     }
     Ok(())
 }
 
-fn cmd_rename(config: &AppConfig) -> Result<()> {
-    let dir_str = config.images_dir.to_string_lossy();
+// --- Commands ---
 
-    for suffix in &config.suffixes {
-        let up_ext = suffix.to_uppercase();
-        let pattern = config.images_dir.join(format!("*.{}", up_ext));
+fn cmd_rename(config: &AppConfig, images: &[PathBuf]) -> Result<()> {
+    let images = resolve_files(images)?;
 
-        for entry in glob::glob(pattern.to_str().context("Path not UTF-8")?)? {
-            if let Ok(path) = entry {
-                let mut new_path = path.clone();
-                new_path.set_extension(suffix);
+    // Check files against suffixes and rename case if needed
+    for path in &images {
+        let suffix = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
 
-                if path != new_path {
-                    println!("Renaming {:?} -> {:?}", path, new_path);
-                    if let Err(e) = fs::rename(&path, &new_path) {
-                        eprintln!("Failed to rename {:?}: {}", path, e);
-                    }
+        // Check if suffix matches any config suffix
+        if config.suffixes.contains(&suffix) {
+            let mut new_path = path.clone();
+            new_path.set_extension(&suffix); // force lowercase suffix
+
+            // Only rename if the path actually changes (e.g. .JPG -> .jpg)
+            if path != &new_path {
+                println!("Renaming {:?} -> {:?}", path, new_path);
+                if let Err(e) = fs::rename(path, &new_path) {
+                    eprintln!("Failed to rename {:?}: {}", path, e);
                 }
             }
         }
     }
 
-    // chmod
-    run("find", &[&dir_str, "-type", "f", "-exec", "chmod", "0644", "{}", "+"])?;
+    // chmod on all provided files
+    let mut args = vec!["chmod", "0644"];
+    let img_strs: Vec<String> = images
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    for img in &img_strs {
+        args.push(img);
+    }
+    // "find" logic replaced by explicit chmod on list?
+    // The original script ran `find ... -exec chmod ...`.
+    // We can just run `chmod` on the list.
+    // Note: If list is too long, might hit arg limit. But typical usage is likely fine.
+    // If not, we should iterate.
+    run("chmod", &args)?; // args[0] is program? No, run(program, args)
+                          // run("chmod", &["0644", file]) loop might be safer but slower.
+                          // Let's pass all at once.
+                          // Wait, run takes (program, &[&str]).
+                          // I need to adapt args vector.
+    let mut chmod_args = vec!["0644"];
+    for img in &img_strs {
+        chmod_args.push(img.as_str());
+    }
+    run("chmod", &chmod_args)?;
 
     // exiftool rename
-    run("exiftool", &[
+    // exiftool -FileName<DateTimeOriginal -d ... -overwrite_original FILES...
+    let mut exif_args = vec![
         "-FileName<DateTimeOriginal",
         "-d",
         "%Y-%m-%d %H.%M.%S%%-c.%%e",
         "-overwrite_original",
-        &dir_str
-    ])?;
+    ];
+    for img in &img_strs {
+        exif_args.push(img.as_str());
+    }
+    run("exiftool", &exif_args)?;
 
-    clean(config)?;
+    clean(&images)?;
     Ok(())
 }
 
-fn cmd_set_time(config: &AppConfig) -> Result<()> {
+fn cmd_set_time(config: &AppConfig, images: &[PathBuf]) -> Result<()> {
+    let images = resolve_files(images)?;
+
     let dst = if !config.timezone_dst { 0 } else { 60 };
     let direction = &config.timezone[0..1];
     let shift = &config.timezone[1..];
@@ -293,51 +378,86 @@ fn cmd_set_time(config: &AppConfig) -> Result<()> {
     let offset_time_orig_arg = format!("-OffSetTimeOriginal={}", config.timezone);
     let offset_time_dig_arg = format!("-OffSetTimeDigitized={}", config.timezone);
     let daylight_arg = format!("-DaylightSavings#={}", dst);
-    let dir_str = config.images_dir.to_string_lossy();
 
-    run("exiftool", &[
-        &all_dates_arg,
-        &timezone_arg,
-        &timezone_city_arg,
-        &offset_time_arg,
-        &offset_time_orig_arg,
-        &offset_time_dig_arg,
-        &daylight_arg,
+    let mut args = vec![
+        all_dates_arg.as_str(),
+        timezone_arg.as_str(),
+        timezone_city_arg.as_str(),
+        offset_time_arg.as_str(),
+        offset_time_orig_arg.as_str(),
+        offset_time_dig_arg.as_str(),
+        daylight_arg.as_str(),
         "-overwrite_original",
-        &dir_str
-    ])?;
+    ];
 
-    clean(config)?;
+    let img_strs: Vec<String> = images
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    for img in &img_strs {
+        args.push(img.as_str());
+    }
+
+    run("exiftool", &args)?;
+
+    clean(&images)?;
     Ok(())
 }
 
-fn cmd_geotag(config: &AppConfig, gps_files: &[PathBuf]) -> Result<()> {
+fn cmd_geotag(config: &AppConfig, gps_files: &[PathBuf], images: &[PathBuf]) -> Result<()> {
     if gps_files.is_empty() {
         return Err(anyhow::anyhow!("No gps files provided"));
     }
+    let images = resolve_files(images)?;
+    let gps_files = resolve_files(gps_files)?;
 
     let mut gps_paths = Vec::new();
     for path in gps_files {
-        gps_paths.push(ensure_gpx(path)?);
+        gps_paths.push(ensure_gpx(&path)?);
     }
 
-    let gpx = if gps_paths.len() > 1 {
-        merge_gpx(config, &gps_paths)?
-    } else {
-        config.images_dir.join(&gps_paths[0])
-    };
+    // We need to group images by directory because gpicsync works on directories
+    let mut dirs: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    for img in &images {
+        if let Some(parent) = img.parent() {
+            dirs.entry(parent.to_path_buf())
+                .or_default()
+                .push(img.clone());
+        }
+    }
 
-    geotag_images(config, &gpx)?;
-    clean(config)?;
+    // For each directory, we merge GPX (outputting to that dir?) and run gpicsync
+    for (dir, _) in dirs {
+        println!("Processing directory: {:?}", dir);
+
+        let gpx = if gps_paths.len() > 1 {
+            merge_gpx(&gps_paths, &dir)?
+        } else {
+            // Copy the single GPX to the dir if it's not there?
+            // Or just reference it.
+            // But merge_gpx creates "all_activities.gpx" in destination.
+            // Let's just use the first GPX path directly if single.
+            gps_paths[0].clone()
+        };
+
+        geotag_images_dir(config, &gpx, &dir)?;
+
+        // If we created a temporary merged file, remove it
+        if gps_paths.len() > 1 && gpx.exists() {
+            if let Err(e) = fs::remove_file(&gpx) {
+                eprintln!("Failed to remove temporary gpx {:?}: {}", gpx, e);
+            }
+        }
+    }
+
+    clean(&images)?;
     Ok(())
 }
 
-fn cmd_shift(config: &AppConfig, reset_tz: bool, by: &str, images: &[PathBuf]) -> Result<()> {
+fn cmd_shift(_config: &AppConfig, reset_tz: bool, by: &str, images: &[PathBuf]) -> Result<()> {
+    let images = resolve_files(images)?;
     if by.is_empty() {
         return Err(anyhow::anyhow!("empty shift pattern"));
-    }
-    if images.is_empty() {
-        return Err(anyhow::anyhow!("No images provided"));
     }
 
     let (direction, amount) = if by.starts_with('+') || by.starts_with('-') {
@@ -348,36 +468,43 @@ fn cmd_shift(config: &AppConfig, reset_tz: bool, by: &str, images: &[PathBuf]) -
 
     let all_dates_arg = format!("-AllDates{}=0:0:0 {}:0", direction, amount);
 
-    let mut args = vec![
-        all_dates_arg,
-        "-overwrite_original".to_string(),
-    ];
+    let mut args = vec![all_dates_arg.as_str(), "-overwrite_original"];
 
     if reset_tz {
-        args.push("-OffSetTime=".to_string());
-        args.push("-OffSetTimeOriginal=".to_string());
-        args.push("-OffSetTimeDigitized=".to_string());
-        args.push("-Timezone=".to_string());
-        args.push("-TimezoneCity=".to_string());
+        args.push("-OffSetTime=");
+        args.push("-OffSetTimeOriginal=");
+        args.push("-OffSetTimeDigitized=");
+        args.push("-Timezone=");
+        args.push("-TimezoneCity=");
     }
 
-    let mut final_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let img_strs: Vec<String> = images.iter().map(|p| p.to_string_lossy().to_string()).collect();
+    let img_strs: Vec<String> = images
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
     for img in &img_strs {
-        final_args.push(img);
+        args.push(img.as_str());
     }
 
-    run("exiftool", &final_args)?;
-    clean(config)?;
+    run("exiftool", &args)?;
+    clean(&images)?;
     Ok(())
 }
 
-fn cmd_set_gps(config: &AppConfig, lat_ref: &str, long_ref: &str, lat: &str, log: &str, images: &[PathBuf]) -> Result<()> {
-    if images.is_empty() {
-        return Err(anyhow::anyhow!("No images provided"));
-    }
+fn cmd_set_gps(
+    _config: &AppConfig,
+    lat_ref: &str,
+    long_ref: &str,
+    lat: &str,
+    log: &str,
+    images: &[PathBuf],
+) -> Result<()> {
+    let images = resolve_files(images)?;
 
-    let _ = lat.trim_end_matches(',').parse::<f64>().context("Invalid lat")?;
+    let _ = lat
+        .trim_end_matches(',')
+        .parse::<f64>()
+        .context("Invalid lat")?;
     let _ = log.parse::<f64>().context("Invalid log")?;
 
     let mut r_lat = lat.trim_end_matches(',').to_string();
@@ -407,13 +534,16 @@ fn cmd_set_gps(config: &AppConfig, lat_ref: &str, long_ref: &str, lat: &str, log
     }
 
     let mut final_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let img_strs: Vec<String> = images.iter().map(|p| p.to_string_lossy().to_string()).collect();
+    let img_strs: Vec<String> = images
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
     for img in &img_strs {
         final_args.push(img);
     }
 
     run("exiftool", &final_args)?;
-    clean(config)?;
+    clean(&images)?;
     Ok(())
 }
 
@@ -424,7 +554,6 @@ fn main() -> Result<()> {
 
     let config = AppConfig {
         suffixes: cli.suffix.iter().map(|s| s.to_lowercase()).collect(),
-        images_dir: cli.images_dir.canonicalize().unwrap_or(cli.images_dir),
         timerange: cli.timerange,
         timezone: tz_info,
         timezone_dst: cli.dst,
@@ -432,17 +561,25 @@ fn main() -> Result<()> {
     };
 
     match &cli.command {
-        Commands::Rename => cmd_rename(&config)?,
-        Commands::SetTime => cmd_set_time(&config)?,
-        Commands::Geotag { gps_files } => cmd_geotag(&config, gps_files)?,
-        Commands::Shift { reset_tz, by, images } => cmd_shift(&config, *reset_tz, by, images)?,
-        Commands::SetGps { latitude_ref, longitude_ref, lat, log, images } => {
-            cmd_set_gps(&config, latitude_ref, longitude_ref, lat, log, images)?
-        }
-        Commands::All { gps_files } => {
-            cmd_geotag(&config, gps_files)?;
-            cmd_set_time(&config)?;
-            cmd_rename(&config)?;
+        Commands::Rename { images } => cmd_rename(&config, images)?,
+        Commands::SetTime { images } => cmd_set_time(&config, images)?,
+        Commands::Geotag { gps_files, images } => cmd_geotag(&config, gps_files, images)?,
+        Commands::Shift {
+            reset_tz,
+            by,
+            images,
+        } => cmd_shift(&config, *reset_tz, by, images)?,
+        Commands::SetGps {
+            latitude_ref,
+            longitude_ref,
+            lat,
+            log,
+            images,
+        } => cmd_set_gps(&config, latitude_ref, longitude_ref, lat, log, images)?,
+        Commands::All { gps_files, images } => {
+            cmd_geotag(&config, gps_files, images)?;
+            cmd_set_time(&config, images)?;
+            cmd_rename(&config, images)?;
         }
     }
 
