@@ -99,6 +99,11 @@ enum Commands {
         #[arg(required = true)]
         images: Vec<PathBuf>,
     },
+    /// Organize photos into directories by date (YYYY-MM-DD)
+    Organize {
+        /// Directory to organize (defaults to current directory)
+        dir: Option<PathBuf>,
+    },
 }
 
 // --- Helpers ---
@@ -295,6 +300,31 @@ fn clean(files: &[PathBuf]) -> Result<()> {
 }
 
 // --- Commands ---
+
+fn cmd_organize(dir: Option<&PathBuf>) -> Result<()> {
+    let default_path = PathBuf::from(".");
+    let target_dir = dir.unwrap_or(&default_path);
+
+    // Change to target directory so that folders are created relative to it
+    std::env::set_current_dir(target_dir)
+        .with_context(|| format!("Failed to change directory to {:?}", target_dir))?;
+
+    // exiftool -d "%Y-%m-%d" "-Directory<DateTimeOriginal" -ext jpg -ext JPG .
+    // This moves files into subdirectories named by date.
+    let args = vec![
+        "-d",
+        "%Y-%m-%d",
+        "-Directory<DateTimeOriginal",
+        "-ext",
+        "jpg",
+        "-ext",
+        "JPG",
+        ".",
+    ];
+
+    run("exiftool", &args)?;
+    Ok(())
+}
 
 fn cmd_rename(config: &AppConfig, images: &[PathBuf]) -> Result<()> {
     let images = resolve_files(images)?;
@@ -581,6 +611,7 @@ fn main() -> Result<()> {
             cmd_set_time(&config, images)?;
             cmd_rename(&config, images)?;
         }
+        Commands::Organize { dir } => cmd_organize(dir.as_ref())?,
     }
 
     Ok(())
