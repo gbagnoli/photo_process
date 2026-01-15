@@ -104,6 +104,8 @@ enum Commands {
         /// Directory to organize (defaults to current directory)
         dir: Option<PathBuf>,
     },
+    /// Process photos: Shift to UTC, Geotag, Set Time (with DST), Rename
+    Process { files: Vec<PathBuf> },
 }
 
 // --- Helpers ---
@@ -326,31 +328,45 @@ fn cmd_organize(dir: Option<&PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_rename(config: &AppConfig, images: &[PathBuf]) -> Result<()> {
-    let images = resolve_files(images)?;
+fn fix_extensions(config: &AppConfig, files: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut resolved = Vec::new();
+    let files = resolve_files(files)?;
 
-    // Check files against suffixes and rename case if needed
-    for path in &images {
+    for path in files {
         let suffix = path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
 
-        // Check if suffix matches any config suffix
         if config.suffixes.contains(&suffix) {
             let mut new_path = path.clone();
             new_path.set_extension(&suffix); // force lowercase suffix
 
-            // Only rename if the path actually changes (e.g. .JPG -> .jpg)
-            if path != &new_path {
-                println!("Renaming {:?} -> {:?}", path, new_path);
-                if let Err(e) = fs::rename(path, &new_path) {
+            if path != new_path {
+                println!("Renaming extension {:?} -> {:?}", path, new_path);
+                if let Err(e) = fs::rename(&path, &new_path) {
                     eprintln!("Failed to rename {:?}: {}", path, e);
+                    if new_path.exists() {
+                        resolved.push(new_path);
+                    } else {
+                        resolved.push(path);
+                    }
+                } else {
+                    resolved.push(new_path);
                 }
+            } else {
+                resolved.push(path);
             }
+        } else {
+            resolved.push(path);
         }
     }
+    Ok(resolved)
+}
+
+fn cmd_rename(config: &AppConfig, images: &[PathBuf]) -> Result<()> {
+    let images = fix_extensions(config, images)?;
 
     // chmod on all provided files
     let mut args = vec!["chmod", "0644"];
@@ -429,8 +445,6 @@ fn cmd_set_time(config: &AppConfig, images: &[PathBuf]) -> Result<()> {
     }
 
     run("exiftool", &args)?;
-
-    clean(&images)?;
     Ok(())
 }
 
@@ -517,7 +531,6 @@ fn cmd_shift(_config: &AppConfig, reset_tz: bool, by: &str, images: &[PathBuf]) 
     }
 
     run("exiftool", &args)?;
-    clean(&images)?;
     Ok(())
 }
 
@@ -577,6 +590,89 @@ fn cmd_set_gps(
     Ok(())
 }
 
+fn cmd_process(config: &AppConfig, files: &[PathBuf]) -> Result<()> {
+    // Separate images and gpx
+    let mut images = Vec::new();
+    let mut gps_files = Vec::new();
+
+    for path in files {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if ext == "gpx" || ext == "tcx" {
+            gps_files.push(path.clone());
+        } else {
+            images.push(path.clone());
+        }
+    }
+
+    if images.is_empty() {
+        return Err(anyhow::anyhow!("No images provided"));
+    }
+
+    // 0. Ensure extensions are lowercase
+    // This updates the 'images' list with potentially new paths
+    let images = fix_extensions(config, &images)?;
+
+    // Parse Timezone
+    let tz_str = &config.timezone; // e.g. "+01:00" or "-05:00"
+    let sign = &tz_str[0..1];
+    let h: i32 = tz_str[1..3].parse()?;
+    let m: i32 = tz_str[4..6].parse()?;
+
+    let mut offset_mins = h * 60 + m;
+    if sign == "-" {
+        offset_mins = -offset_mins;
+    }
+
+    // Apply DST to offset if needed
+    if config.timezone_dst {
+        offset_mins += 60;
+    }
+
+    // 1. Shift to UTC
+    // We want to remove the offset. So shift by -offset_mins.
+    let utc_shift_mins = -offset_mins;
+
+    let shift_sign = if utc_shift_mins >= 0 { "+" } else { "-" };
+    let abs_shift = utc_shift_mins.abs();
+    let sh = abs_shift / 60;
+    let sm = abs_shift % 60;
+    let shift_str = format!("{}{:02}:{:02}", shift_sign, sh, sm);
+
+    println!("Shifting images to UTC (Offset: {})", shift_str);
+    cmd_shift(config, false, &shift_str, &images)?;
+
+    // 2. Geotag
+    if !gps_files.is_empty() {
+        cmd_geotag(config, &gps_files, &images)?;
+    } else {
+        println!("No GPX files, skipping geotag.");
+    }
+
+    // 3. Set Time (and restore timezone)
+    // We need to construct a config that reflects the Total Offset (Base + DST)
+    // so that cmd_set_time shifts correctly and sets correct metadata.
+    let mut final_config = config.clone();
+
+    // Format offset_mins back to string for config.timezone
+    let final_sign = if offset_mins >= 0 { "+" } else { "-" };
+    let final_abs = offset_mins.abs();
+    let fh = final_abs / 60;
+    let fm = final_abs % 60;
+    final_config.timezone = format!("{}{:02}:{:02}", final_sign, fh, fm);
+
+    println!("Setting time and timezone to {}", final_config.timezone);
+    cmd_set_time(&final_config, &images)?;
+
+    // 4. Rename
+    cmd_rename(config, &images)?;
+
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -612,6 +708,7 @@ fn main() -> Result<()> {
             cmd_rename(&config, images)?;
         }
         Commands::Organize { dir } => cmd_organize(dir.as_ref())?,
+        Commands::Process { files } => cmd_process(&config, files)?,
     }
 
     Ok(())
