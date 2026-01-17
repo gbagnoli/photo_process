@@ -1,7 +1,2 @@
 .env
-__pycache__
-.mypy_cache
-.python-version
-build/
-photo_process.egg-info/
 target
