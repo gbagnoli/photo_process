@@ -88,13 +88,13 @@ enum Commands {
     },
     /// detect timezone from photos and shift to UTC
     ShiftToUtc {
-        /// Directories to process
-        dirs: Vec<PathBuf>,
+        /// Files or directories to process
+        paths: Vec<PathBuf>,
     },
     /// detect timezone from photos in directories
     DetectTimezone {
-        /// Directories to process
-        dirs: Vec<PathBuf>,
+        /// Files or directories to process
+        paths: Vec<PathBuf>,
     },
     /// Organize photos into directories by date (YYYY-MM-DD)
     Organize {
@@ -683,18 +683,18 @@ fn cmd_shift(config: &AppConfig, reset_tz: bool, by: &str, images: &[PathBuf]) -
     Ok(())
 }
 
-fn scan_images_by_dir(config: &AppConfig, dirs: &[PathBuf]) -> HashMap<PathBuf, Vec<PathBuf>> {
+fn scan_images_from_paths(config: &AppConfig, paths: &[PathBuf]) -> HashMap<PathBuf, Vec<PathBuf>> {
     let mut dir_images_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
 
-    for dir in dirs {
-        if !dir.exists() {
-            eprintln!("Warning: Directory {:?} does not exist, skipping.", dir);
+    for path in paths {
+        if !path.exists() {
+            eprintln!("Warning: Path {:?} does not exist, skipping.", path);
             continue;
         }
-        let (images, _) = get_files_recursively(dir, config);
+        let (images, _) = get_files_recursively(path, config);
 
         if !images.is_empty() {
-            dir_images_map.insert(dir.clone(), images);
+            dir_images_map.insert(path.clone(), images);
         }
     }
     dir_images_map
@@ -705,27 +705,19 @@ struct TzDetectionResult {
     offset: Result<(String, bool)>,
 }
 
-fn detect_timezones(config: &AppConfig, dirs: &[PathBuf]) -> HashMap<PathBuf, TzDetectionResult> {
+fn detect_timezones(config: &AppConfig, paths: &[PathBuf]) -> HashMap<PathBuf, TzDetectionResult> {
     let mut results = HashMap::new();
-    let dir_images = scan_images_by_dir(config, dirs);
+    let dir_images = scan_images_from_paths(config, paths);
 
-    for (dir, images) in dir_images {
+    for (path, images) in dir_images {
         let offset_res = if let Some(img) = images.first() {
             get_image_offset(img)
         } else {
             Err(anyhow::anyhow!("No images"))
         };
 
-        if let Ok((_, dst)) = &offset_res {
-            println!(
-                "Directory: {:?}, DST found: {}",
-                dir,
-                if *dst { "Yes" } else { "No" }
-            );
-        }
-
         results.insert(
-            dir,
+            path,
             TzDetectionResult {
                 images,
                 offset: offset_res,
@@ -735,41 +727,57 @@ fn detect_timezones(config: &AppConfig, dirs: &[PathBuf]) -> HashMap<PathBuf, Tz
     results
 }
 
-fn cmd_detect_timezone(config: &AppConfig, dirs: &[PathBuf]) -> Result<()> {
-    let results = detect_timezones(config, dirs);
+fn cmd_detect_timezone(config: &AppConfig, paths: &[PathBuf]) -> Result<()> {
+    let results = detect_timezones(config, paths);
 
     if results.is_empty() {
         println!("No images found.");
         return Ok(());
     }
 
-    for (dir, res) in results {
+    for (path, res) in results {
+        let label = if path.is_dir() { "Directory" } else { "File" };
         match res.offset {
-            Ok((offset, _)) => println!("Directory: {:?}, Detected Offset: {}", dir, offset),
-            Err(e) => eprintln!("Directory: {:?}, Failed to detect offset: {}", dir, e),
+            Ok((offset, dst)) => {
+                println!(
+                    "{}: {:?}, Detected Offset: {}, DST found: {}",
+                    label,
+                    path,
+                    offset,
+                    if dst { "Yes" } else { "No" }
+                );
+            }
+            Err(e) => eprintln!("{}: {:?}, Failed to detect offset: {}", label, path, e),
         }
     }
     Ok(())
 }
 
-fn cmd_shift_to_utc(config: &AppConfig, dirs: &[PathBuf]) -> Result<()> {
-    let results = detect_timezones(config, dirs);
+fn cmd_shift_to_utc(config: &AppConfig, paths: &[PathBuf]) -> Result<()> {
+    let results = detect_timezones(config, paths);
 
     if results.is_empty() {
         println!("No images found.");
         return Ok(());
     }
 
-    for (dir, res) in results {
-        let (offset_str, _) = match res.offset {
+    for (path, res) in results {
+        let label = if path.is_dir() { "Directory" } else { "File" };
+        let (offset_str, dst) = match res.offset {
             Ok(o) => o,
             Err(e) => {
-                eprintln!("Directory: {:?}, Failed to detect offset: {}", dir, e);
+                eprintln!("{}: {:?}, Failed to detect offset: {}", label, path, e);
                 continue;
             }
         };
 
-        println!("Directory: {:?}, Detected Offset: {}", dir, offset_str);
+        println!(
+            "{}: {:?}, Detected Offset: {}, DST found: {}",
+            label,
+            path,
+            offset_str,
+            if dst { "Yes" } else { "No" }
+        );
         // Parse offset
         // format: +HH:MM or -HH:MM
         let (sign, rest) = if offset_str.starts_with('+') || offset_str.starts_with('-') {
@@ -905,8 +913,8 @@ fn main() -> Result<()> {
             by,
             images,
         } => cmd_shift(&config, *reset_tz, by, images)?,
-        Commands::ShiftToUtc { dirs } => cmd_shift_to_utc(&config, dirs)?,
-        Commands::DetectTimezone { dirs } => cmd_detect_timezone(&config, dirs)?,
+        Commands::ShiftToUtc { paths } => cmd_shift_to_utc(&config, paths)?,
+        Commands::DetectTimezone { paths } => cmd_detect_timezone(&config, paths)?,
         Commands::Organize { dir } => cmd_organize(&config, dir.as_ref())?,
         Commands::Process { dirs, .. } => cmd_process(&config, dirs)?,
     }
