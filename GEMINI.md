@@ -27,8 +27,8 @@ cargo build --release
 # Run via cargo
 cargo run --release -- <command> [options]
 
-# Example: Run the 'all' command
-cargo run --release -- all --gps-files path/to/track.gpx path/to/images/*.jpg
+# Example: Run the 'process' command
+cargo run --release -- process -z Dublin /path/to/photos
 ```
 
 **Key Commands:**
@@ -37,16 +37,18 @@ cargo run --release -- all --gps-files path/to/track.gpx path/to/images/*.jpg
 *   `geotag`: Geotag images using GPX files.
 *   `set-time`: Set time and timezone on pictures.
 *   `shift-to-utc`: Detect timezone from photos and shift to UTC.
+*   `detect-timezone`: Detect timezone offset from photos in directories.
 *   `rename`: Rename images based on date/time.
 
 ## Development Conventions
 
-*   **Rust Workflow**: After any changes to the code, you **must** run the following commands to ensure code quality and style adherence:
+*   **Rust Workflow**: After any changes to the code, you **must** run the following commands to ensure code quality, style adherence, and successful compilation:
     ```bash
     cargo fmt
     cargo check
     cargo clippy
+    cargo build
     ```
 *   **External Tool Wrappers**: Much of the logic involves constructing and executing arguments for `exiftool` and `gpicsync`.
-*   **Timezones**: Timezones are handled via a predefined list of cities (e.g., "Dublin", "New York") mapping to offsets.
+*   **Timezones**: Timezones are handled via a predefined list of cities (e.g., "Dublin", "New York") mapping to offsets. The `TZ_CITIES_DATA` vector in the Rust code should **never** be changed.
 *   **File Handling**: Operations often involve recursive directory scanning and pattern matching for image extensions (default: jpg, mp4).

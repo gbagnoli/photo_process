@@ -12,11 +12,13 @@ const TZ_CITIES_DATA: &[(&str, i32, &str)] = &[
     ("Austin", 28, "-06:00"),
     ("Buenos Aires", 25, "-04:00"),
     ("Dublin", 20, "+00:00"),
+    ("Galapagos", 28, "-06:00"),
     ("London", 20, "+00:00"),
     ("Mexico City", 28, "-06:00"),
     ("New York", 27, "-05:00"),
     ("Rome", 19, "+01:00"),
     ("Quintana Roo", 27, "-05:00"),
+    ("Quito", 27, "-05:00"),
     ("San Francisco", 30, "-08:00"),
     ("Santiago", 25, "-04:00"),
     ("Singapore", 7, "+08:00"),
@@ -89,12 +91,10 @@ enum Commands {
         /// Directories to process
         dirs: Vec<PathBuf>,
     },
-    /// Run all: geotag, set_time, rename
-    All {
-        #[arg(short = 'g', long, required = true)]
-        gps_files: Vec<PathBuf>,
-        #[arg(required = true)]
-        images: Vec<PathBuf>,
+    /// detect timezone from photos in directories
+    DetectTimezone {
+        /// Directories to process
+        dirs: Vec<PathBuf>,
     },
     /// Organize photos into directories by date (YYYY-MM-DD)
     Organize {
@@ -387,7 +387,7 @@ fn format_offset(mins: i32) -> String {
     format!("{}{:02}:{:02}", sign, h, m)
 }
 
-fn get_image_offset(file: &Path) -> Result<String> {
+fn get_image_offset(file: &Path) -> Result<(String, bool)> {
     let args = &[
         "-G1",
         "-a",
@@ -444,7 +444,7 @@ fn get_image_offset(file: &Path) -> Result<String> {
     if let Some(oto) = offset_time_orig {
         // If OffsetTimeOriginal exists, use it directly.
         // Usually it includes DST if applicable.
-        return Ok(oto);
+        return Ok((oto, dst_on));
     }
 
     if let Some(tz) = timezone_val {
@@ -454,7 +454,7 @@ fn get_image_offset(file: &Path) -> Result<String> {
         if dst_on {
             mins += 60;
         }
-        return Ok(format_offset(mins));
+        return Ok((format_offset(mins), dst_on));
     }
 
     Err(anyhow::anyhow!("No offset found in {:?}", file))
@@ -683,8 +683,7 @@ fn cmd_shift(config: &AppConfig, reset_tz: bool, by: &str, images: &[PathBuf]) -
     Ok(())
 }
 
-fn cmd_shift_to_utc(config: &AppConfig, dirs: &[PathBuf]) -> Result<()> {
-    // We group images by directory to handle offsets per directory
+fn scan_images_by_dir(config: &AppConfig, dirs: &[PathBuf]) -> HashMap<PathBuf, Vec<PathBuf>> {
     let mut dir_images_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
 
     for dir in dirs {
@@ -698,40 +697,99 @@ fn cmd_shift_to_utc(config: &AppConfig, dirs: &[PathBuf]) -> Result<()> {
             dir_images_map.insert(dir.clone(), images);
         }
     }
+    dir_images_map
+}
 
-    if dir_images_map.is_empty() {
+struct TzDetectionResult {
+    images: Vec<PathBuf>,
+    offset: Result<(String, bool)>,
+}
+
+fn detect_timezones(config: &AppConfig, dirs: &[PathBuf]) -> HashMap<PathBuf, TzDetectionResult> {
+    let mut results = HashMap::new();
+    let dir_images = scan_images_by_dir(config, dirs);
+
+    for (dir, images) in dir_images {
+        let offset_res = if let Some(img) = images.first() {
+            get_image_offset(img)
+        } else {
+            Err(anyhow::anyhow!("No images"))
+        };
+
+        if let Ok((_, dst)) = &offset_res {
+            println!(
+                "Directory: {:?}, DST found: {}",
+                dir,
+                if *dst { "Yes" } else { "No" }
+            );
+        }
+
+        results.insert(
+            dir,
+            TzDetectionResult {
+                images,
+                offset: offset_res,
+            },
+        );
+    }
+    results
+}
+
+fn cmd_detect_timezone(config: &AppConfig, dirs: &[PathBuf]) -> Result<()> {
+    let results = detect_timezones(config, dirs);
+
+    if results.is_empty() {
         println!("No images found.");
         return Ok(());
     }
 
-    for (dir, images) in &dir_images_map {
-        // Pick first image to read offset
-        if let Some(first_img) = images.first() {
-            let offset_str = get_image_offset(first_img)
-                .with_context(|| format!("Could not determine offset for directory {:?}", dir))?;
+    for (dir, res) in results {
+        match res.offset {
+            Ok((offset, _)) => println!("Directory: {:?}, Detected Offset: {}", dir, offset),
+            Err(e) => eprintln!("Directory: {:?}, Failed to detect offset: {}", dir, e),
+        }
+    }
+    Ok(())
+}
 
-            println!("Directory: {:?}, Detected Offset: {}", dir, offset_str);
-            // Parse offset
-            // format: +HH:MM or -HH:MM
-            let (sign, rest) = if offset_str.starts_with('+') || offset_str.starts_with('-') {
-                (&offset_str[0..1], &offset_str[1..])
-            } else {
-                ("+", offset_str.as_str())
-            };
+fn cmd_shift_to_utc(config: &AppConfig, dirs: &[PathBuf]) -> Result<()> {
+    let results = detect_timezones(config, dirs);
 
-            // Parse HH:MM
-            let parts: Vec<&str> = rest.split(':').collect();
-            if parts.len() < 2 {
-                eprintln!("Invalid offset format {}, skipping shift.", offset_str);
+    if results.is_empty() {
+        println!("No images found.");
+        return Ok(());
+    }
+
+    for (dir, res) in results {
+        let (offset_str, _) = match res.offset {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("Directory: {:?}, Failed to detect offset: {}", dir, e);
                 continue;
             }
+        };
 
-            let shift_sign = if sign == "+" { "-" } else { "+" };
-            let shift_val = format!("{}{}:{}", shift_sign, parts[0], parts[1]);
+        println!("Directory: {:?}, Detected Offset: {}", dir, offset_str);
+        // Parse offset
+        // format: +HH:MM or -HH:MM
+        let (sign, rest) = if offset_str.starts_with('+') || offset_str.starts_with('-') {
+            (&offset_str[0..1], &offset_str[1..])
+        } else {
+            ("+", offset_str.as_str())
+        };
 
-            println!("  -> Shifting to UTC by {}", shift_val);
-            cmd_shift(config, false, &shift_val, images)?;
+        // Parse HH:MM
+        let parts: Vec<&str> = rest.split(':').collect();
+        if parts.len() < 2 {
+            eprintln!("Invalid offset format {}, skipping shift.", offset_str);
+            continue;
         }
+
+        let shift_sign = if sign == "+" { "-" } else { "+" };
+        let shift_val = format!("{}{}:{}", shift_sign, parts[0], parts[1]);
+
+        println!("  -> Shifting to UTC by {}", shift_val);
+        cmd_shift(config, false, &shift_val, &res.images)?;
     }
     Ok(())
 }
@@ -848,11 +906,7 @@ fn main() -> Result<()> {
             images,
         } => cmd_shift(&config, *reset_tz, by, images)?,
         Commands::ShiftToUtc { dirs } => cmd_shift_to_utc(&config, dirs)?,
-        Commands::All { gps_files, images } => {
-            cmd_geotag(&config, gps_files, images)?;
-            cmd_set_time(&config, images)?;
-            cmd_rename(&config, images)?;
-        }
+        Commands::DetectTimezone { dirs } => cmd_detect_timezone(&config, dirs)?,
         Commands::Organize { dir } => cmd_organize(&config, dir.as_ref())?,
         Commands::Process { dirs, .. } => cmd_process(&config, dirs)?,
     }
