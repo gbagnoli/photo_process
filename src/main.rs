@@ -84,6 +84,11 @@ enum Commands {
         by: String,
         images: Vec<PathBuf>,
     },
+    /// detect timezone from photos and shift to UTC
+    ShiftToUtc {
+        /// Directories to process
+        dirs: Vec<PathBuf>,
+    },
     /// Run all: geotag, set_time, rename
     All {
         #[arg(short = 'g', long, required = true)]
@@ -678,14 +683,8 @@ fn cmd_shift(config: &AppConfig, reset_tz: bool, by: &str, images: &[PathBuf]) -
     Ok(())
 }
 
-fn cmd_process(config: &AppConfig, dirs: &[PathBuf]) -> Result<()> {
-    // 1. Scan Input Directories
-    println!("Scanning input directories for images and GPX files...");
-
+fn cmd_shift_to_utc(config: &AppConfig, dirs: &[PathBuf]) -> Result<()> {
     // We group images by directory to handle offsets per directory
-    // We also collect all GPX files found.
-    // Note: GPX files found in inputs are collected for the "Geotag" step later.
-    let mut all_gps_files = Vec::new();
     let mut dir_images_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
 
     for dir in dirs {
@@ -693,15 +692,7 @@ fn cmd_process(config: &AppConfig, dirs: &[PathBuf]) -> Result<()> {
             eprintln!("Warning: Directory {:?} does not exist, skipping.", dir);
             continue;
         }
-        let (images, gpx) = get_files_recursively(dir, config);
-        all_gps_files.extend(gpx);
-
-        // Group images by parent directory (or just the input dir?)
-        // The prompt says "for each directory we can assume all pictures have the same offset".
-        // This implies the input directory is the unit of assumption.
-        // However, if input dir is "Root" and it has "SubA", "SubB".
-        // Do we assume Root recursively has same offset? Yes, likely.
-        // So we associate all found images with the `dir` they came from.
+        let (images, _) = get_files_recursively(dir, config);
 
         if !images.is_empty() {
             dir_images_map.insert(dir.clone(), images);
@@ -713,7 +704,6 @@ fn cmd_process(config: &AppConfig, dirs: &[PathBuf]) -> Result<()> {
         return Ok(());
     }
 
-    // 2. Determine Offsets and Shift to UTC
     for (dir, images) in &dir_images_map {
         // Pick first image to read offset
         if let Some(first_img) = images.first() {
@@ -736,23 +726,43 @@ fn cmd_process(config: &AppConfig, dirs: &[PathBuf]) -> Result<()> {
                 continue;
             }
 
-            // To shift TO UTC:
-            // If Time is 12:00 +02:00. UTC is 10:00.
-            // We need to shift by -02:00.
-            // So we INVERT the detected offset.
-
-            // Construct shift string for cmd_shift
-            // cmd_shift takes "+HH:MM" or "-HH:MM" and shifts AllDates.
-            // If detected is "+02:00", we want "-02:00".
-            // If detected is "-05:00", we want "+05:00".
-
             let shift_sign = if sign == "+" { "-" } else { "+" };
             let shift_val = format!("{}{}:{}", shift_sign, parts[0], parts[1]);
 
             println!("  -> Shifting to UTC by {}", shift_val);
             cmd_shift(config, false, &shift_val, images)?;
+        }
+    }
+    Ok(())
+}
 
-            // 3. Organize (Move to CWD)
+fn cmd_process(config: &AppConfig, dirs: &[PathBuf]) -> Result<()> {
+    // 1. Scan Input Directories
+    println!("Scanning input directories for images and GPX files...");
+
+    // We collect all GPX files found for later use
+    let mut all_gps_files = Vec::new();
+    let mut dir_images_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+
+    for dir in dirs {
+        if !dir.exists() {
+            eprintln!("Warning: Directory {:?} does not exist, skipping.", dir);
+            continue;
+        }
+        let (images, gpx) = get_files_recursively(dir, config);
+        all_gps_files.extend(gpx);
+
+        if !images.is_empty() {
+            dir_images_map.insert(dir.clone(), images);
+        }
+    }
+
+    // 2. Shift to UTC
+    cmd_shift_to_utc(config, dirs)?;
+
+    // 3. Organize (Move to CWD)
+    if !dir_images_map.is_empty() {
+        for images in dir_images_map.values() {
             println!("  -> Organizing (Moving to CWD)");
             organize_files(config, images)?;
         }
@@ -837,6 +847,7 @@ fn main() -> Result<()> {
             by,
             images,
         } => cmd_shift(&config, *reset_tz, by, images)?,
+        Commands::ShiftToUtc { dirs } => cmd_shift_to_utc(&config, dirs)?,
         Commands::All { gps_files, images } => {
             cmd_geotag(&config, gps_files, images)?;
             cmd_set_time(&config, images)?;

@@ -36,6 +36,7 @@ cargo run --release -- all --gps-files path/to/track.gpx path/to/images/*.jpg
 *   `organize`: Organize photos into directories by date.
 *   `geotag`: Geotag images using GPX files.
 *   `set-time`: Set time and timezone on pictures.
+*   `shift-to-utc`: Detect timezone from photos and shift to UTC.
 *   `rename`: Rename images based on date/time.
 
 ## Development Conventions

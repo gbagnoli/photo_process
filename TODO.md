@@ -1,6 +1,5 @@
 # features
 
-* extract shift to utc as command
 * add command to download GPX from garmin
 * latch command to download gpx into process and make it autodiscover the time
   range
