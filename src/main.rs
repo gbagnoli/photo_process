@@ -183,7 +183,7 @@ fn get_files_recursively(dir: &Path, config: &AppConfig) -> (Vec<PathBuf>, Vec<P
                 .unwrap_or("")
                 .to_lowercase();
 
-            if ext == "gpx" || ext == "tcx" {
+            if ext == "gpx" {
                 gpx_files.push(path.to_path_buf());
             } else if config.suffixes.contains(&ext) {
                 images.push(path.to_path_buf());
@@ -270,24 +270,11 @@ fn ensure_gpx(gps_file: &Path, dry_run: bool) -> Result<PathBuf> {
                 fs::rename(gps_file, &dest)?;
             }
         }
-    } else if suffix == "tcx" {
-        run(
-            "gpsbabel",
-            &[
-                "-i",
-                "gtrnctr",
-                "-f",
-                gps_file.to_str().context("Path not UTF-8")?,
-                "-o",
-                "gpx",
-                "-F",
-                dest.to_str().context("Path not UTF-8")?,
-            ],
-            &[],
-            dry_run,
-        )?;
     } else {
-        return Err(anyhow::anyhow!("Unknown format {:?}", suffix));
+        return Err(anyhow::anyhow!(
+            "Unknown format {:?}. Only .gpx is supported.",
+            suffix
+        ));
     }
 
     Ok(dest)
@@ -295,32 +282,41 @@ fn ensure_gpx(gps_file: &Path, dry_run: bool) -> Result<PathBuf> {
 
 fn merge_gpx(gpx_files: &[PathBuf], output_dir: &Path, dry_run: bool) -> Result<PathBuf> {
     let dest = output_dir.join("all_activities.gpx");
-    if !dry_run && dest.exists() {
+    if dry_run {
+        println!(
+            "DRY-RUN: Merge {} GPX files into {:?}",
+            gpx_files.len(),
+            dest
+        );
+        return Ok(dest);
+    }
+
+    if dest.exists() {
         let _ = fs::remove_file(&dest);
     }
 
-    let options = vec!["-i", "gpx"];
-    let mut file_args = Vec::new();
+    let mut merged_gpx = gpx::Gpx {
+        version: gpx::GpxVersion::Gpx11,
+        ..Default::default()
+    };
 
     for path in gpx_files {
         if path.file_name().and_then(|n| n.to_str()) == Some("all_activities.gpx") {
             continue;
         }
-        file_args.push(path.to_string_lossy().to_string());
+        let file = fs::File::open(path)?;
+        let reader = std::io::BufReader::new(file);
+        let g = gpx::read(reader).with_context(|| format!("Failed to read GPX file {:?}", path))?;
+
+        merged_gpx.tracks.extend(g.tracks);
+        merged_gpx.routes.extend(g.routes);
+        merged_gpx.waypoints.extend(g.waypoints);
     }
 
-    let mut cmd_args: Vec<&str> = options;
-    for f in &file_args {
-        cmd_args.push("-f");
-        cmd_args.push(f);
-    }
-    cmd_args.push("-o");
-    cmd_args.push("gpx");
-    cmd_args.push("-F");
-    let dest_str = dest.to_string_lossy().to_string();
-    cmd_args.push(&dest_str);
-
-    run("gpsbabel", &cmd_args, &[], dry_run)?;
+    let file = fs::File::create(&dest)?;
+    let writer = std::io::BufWriter::new(file);
+    gpx::write(&merged_gpx, writer)
+        .with_context(|| format!("Failed to write merged GPX to {:?}", dest))?;
 
     Ok(dest)
 }

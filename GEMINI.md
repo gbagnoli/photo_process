@@ -11,7 +11,6 @@ The tool relies heavily on external CLI utilities to perform file manipulations 
 The following tools must be installed and available in your system's `$PATH`:
 
 *   **[ExifTool](https://exiftool.org/)**: Used for reading and writing metadata (EXIF tags).
-*   **[GPSBabel](https://www.gpsbabel.org/)**: Used for converting and manipulating GPS data files (GPX, TCX).
 *   **[gpicsync](https://github.com/h4tr3d/gpicsync)**: Used for geotagging images based on GPX files.
 
 ## Building and Running
@@ -47,6 +46,6 @@ cargo run --release -- all --gps-files path/to/track.gpx path/to/images/*.jpg
     cargo check
     cargo clippy
     ```
-*   **External Tool Wrappers**: Much of the logic involves constructing and executing arguments for `exiftool`, `gpsbabel`, and `gpicsync`.
+*   **External Tool Wrappers**: Much of the logic involves constructing and executing arguments for `exiftool` and `gpicsync`.
 *   **Timezones**: Timezones are handled via a predefined list of cities (e.g., "Dublin", "New York") mapping to offsets.
 *   **File Handling**: Operations often involve recursive directory scanning and pattern matching for image extensions (default: jpg, mp4).
