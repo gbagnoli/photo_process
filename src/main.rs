@@ -8,24 +8,58 @@ use walkdir::WalkDir;
 
 // --- Constants & Config ---
 
+/* not an exaustive list
+see https://sno.phy.queensu.ca/~phil/exiftool/TagNames/Canon.html
+https://github.com/alchemy-fr/exiftool/blob/master/lib/Image/ExifTool/Canon.pm#L5891-L5930
+*/
 const TZ_CITIES_DATA: &[(&str, i32, &str)] = &[
+    ("Adelaide", 5, "+09:30"),
+    ("Anchorage", 31, "-09:00"),
     ("Austin", 28, "-06:00"),
+    ("Azores", 21, "-01:00"),
+    ("Bangkok", 8, "+07:00"),
     ("Buenos Aires", 25, "-04:00"),
+    ("Cairo", 18, "+02:00"),
+    ("Caracas", 26, "-04:30"),
+    ("Chatham Islands", 1, "+12:45"),
+    ("Chicago", 28, "-06:00"),
+    ("Delhi", 12, "+05:30"),
+    ("Denver", 29, "-07:00"),
+    ("Dhaka", 10, "+06:00"),
+    ("Dubai", 15, "+04:00"),
     ("Dublin", 20, "+00:00"),
+    ("Fernando de Noronha", 22, "-02:00"),
     ("Galapagos", 28, "-06:00"),
+    ("Hong Kong", 7, "+08:00"),
+    ("Honolulu", 32, "-10:00"),
+    ("Kabul", 14, "+04:30"),
+    ("Karachi", 13, "+05:00"),
+    ("Kathmandu", 11, "+05:45"),
+    ("Kiev", 17, "+02:00"),
     ("London", 20, "+00:00"),
+    ("Los Angeles", 30, "-08:00"),
     ("Mexico City", 28, "-06:00"),
+    ("Moscow", 17, "+04:00"),
     ("New York", 27, "-05:00"),
-    ("Rome", 19, "+01:00"),
+    ("Newfoundland", 24, "-03:30"),
+    ("Paris", 19, "+01:00"),
     ("Quintana Roo", 27, "-05:00"),
     ("Quito", 27, "-05:00"),
+    ("Rome", 19, "+01:00"),
+    ("Samoa", 33, "+13:00"),
     ("San Francisco", 30, "-08:00"),
     ("Santiago", 25, "-04:00"),
+    ("Sao Paulo", 23, "-03:00"),
     ("Singapore", 7, "+08:00"),
-    ("Kiev", 17, "+02:00"),
+    ("Solomon Islands", 3, "+11:00"),
+    ("Sydney", 4, "+10:00"),
+    ("Tehran", 16, "+03:30"),
+    ("Tokyo", 6, "+09:00"),
     ("US/Central", 28, "-06:00"),
     ("US/Eastern", 27, "-05:00"),
     ("US/Pacific", 30, "-08:00"),
+    ("Wellington", 2, "+12:00"),
+    ("Yangon", 9, "+06:30"),
 ];
 
 #[derive(Debug, Clone)]
@@ -205,6 +239,28 @@ fn get_tz_info(city: &str) -> Result<(i32, String)> {
         }
     }
     Err(anyhow::anyhow!("Unknown timezone city: {}", city))
+}
+
+/// Returns a list of city names that match the given offset (e.g., "+01:00")
+#[allow(dead_code)]
+fn get_cities_by_offset(offset: &str) -> Vec<&str> {
+    TZ_CITIES_DATA
+        .iter()
+        .filter(|(_, _, tz_offset)| *tz_offset == offset)
+        .map(|(name, _, _)| *name)
+        .collect()
+}
+
+/// Builds a full reverse index mapping offsets to lists of city names
+#[allow(dead_code)]
+fn get_reverse_timezone_index() -> HashMap<String, Vec<&'static str>> {
+    let mut index: HashMap<String, Vec<&'static str>> = HashMap::new();
+
+    for (name, _, offset) in TZ_CITIES_DATA {
+        index.entry(offset.to_string()).or_default().push(name);
+    }
+
+    index
 }
 
 fn gpx_name(gps_file: &Path, _dry_run: bool) -> Result<PathBuf> {
