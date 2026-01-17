@@ -3,7 +3,8 @@ use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use walkdir::WalkDir;
 
 // --- Constants & Config ---
 
@@ -32,6 +33,7 @@ struct AppConfig {
     timezone: String,
     timezone_dst: bool,
     timezone_id: i32,
+    dry_run: bool,
 }
 
 // --- CLI Definitions ---
@@ -104,23 +106,63 @@ enum Commands {
         /// Directory to organize (defaults to current directory)
         dir: Option<PathBuf>,
     },
-    /// Process photos: Shift to UTC, Geotag, Set Time (with DST), Rename
-    Process { files: Vec<PathBuf> },
+    /// Process photos: Shift to UTC, Organize, Geotag, Set Time (with DST), Rename
+    Process {
+        #[arg(long, default_value_t = false)]
+        force: bool,
+        /// Directories to process
+        dirs: Vec<PathBuf>,
+    },
 }
 
 // --- Helpers ---
 
-fn run(program: &str, args: &[&str]) -> Result<()> {
-    println!("Running: {} {}", program, args.join(" "));
+fn run(program: &str, args: &[&str], files: &[&str], dry_run: bool) -> Result<()> {
+    if dry_run {
+        let mut msg = format!("DRY-RUN: {} {}", program, args.join(" "));
+        if !files.is_empty() {
+            msg.push(' ');
+            msg.push_str(files[0]);
+            if files.len() > 1 {
+                msg.push_str(&format!(" ... (and {} more files)", files.len() - 1));
+            }
+        }
+        println!("{}", msg.trim());
+        return Ok(());
+    }
+
+    println!(
+        "Running: {} {} {}",
+        program,
+        args.join(" "),
+        files.join(" ")
+    );
     let status = Command::new(program)
         .args(args)
+        .args(files)
         .status()
-        .with_context(|| "Failed to execute command")?;
+        .with_context(|| format!("Failed to execute {}", program))?;
 
     if !status.success() {
-        return Err(anyhow::anyhow!("Command exited with non-zero status"));
+        return Err(anyhow::anyhow!(
+            "Command {} exited with non-zero status",
+            program
+        ));
     }
     Ok(())
+}
+
+fn run_capture(program: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new(program)
+        .args(args)
+        .stderr(Stdio::inherit())
+        .output()
+        .with_context(|| format!("Failed to execute {}", program))?;
+
+    if !output.status.success() {
+        return Err(anyhow::anyhow!("Command {} failed", program));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn resolve_files(files: &[PathBuf]) -> Result<Vec<PathBuf>> {
@@ -132,14 +174,33 @@ fn resolve_files(files: &[PathBuf]) -> Result<Vec<PathBuf>> {
                     .with_context(|| format!("Failed to canonicalize {:?}", path))?,
             );
         } else {
-            // If file doesn't exist, we might want to keep it as is or error?
-            // Since commands usually expect existing files, erroring or passing as-is is safer.
-            // We'll try to convert to absolute path even if not exists (current_dir join) or just warn.
-            // For now, let's error if input explicitly doesn't exist.
             return Err(anyhow::anyhow!("File not found: {:?}", path));
         }
     }
     Ok(resolved)
+}
+
+fn get_files_recursively(dir: &Path, config: &AppConfig) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut images = Vec::new();
+    let mut gpx_files = Vec::new();
+
+    for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_file() {
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+
+            if ext == "gpx" || ext == "tcx" {
+                gpx_files.push(path.to_path_buf());
+            } else if config.suffixes.contains(&ext) {
+                images.push(path.to_path_buf());
+            }
+        }
+    }
+    (images, gpx_files)
 }
 
 fn get_tz_info(city: &str) -> Result<(i32, String)> {
@@ -151,7 +212,7 @@ fn get_tz_info(city: &str) -> Result<(i32, String)> {
     Err(anyhow::anyhow!("Unknown timezone city: {}", city))
 }
 
-fn gpx_name(gps_file: &Path) -> Result<PathBuf> {
+fn gpx_name(gps_file: &Path, _dry_run: bool) -> Result<PathBuf> {
     if gps_file.extension().and_then(|e| e.to_str()) != Some("gpx") {
         let mut dest = gps_file.parent().unwrap_or(Path::new(".")).to_path_buf();
         dest.push(format!(
@@ -167,6 +228,9 @@ fn gpx_name(gps_file: &Path) -> Result<PathBuf> {
     if gps_file.file_name().and_then(|n| n.to_str()) == Some("all_activities.gpx") {
         return Ok(gps_file.to_path_buf());
     }
+
+    // In dry run, we might not be able to read file if it doesn't exist yet (created by previous step?)
+    // But here we read existing files.
 
     let file = fs::File::open(gps_file)?;
     let reader = std::io::BufReader::new(file);
@@ -204,15 +268,17 @@ fn gpx_name(gps_file: &Path) -> Result<PathBuf> {
     Ok(dest)
 }
 
-fn ensure_gpx(gps_file: &Path) -> Result<PathBuf> {
-    let dest = gpx_name(gps_file)?;
+fn ensure_gpx(gps_file: &Path, dry_run: bool) -> Result<PathBuf> {
+    let dest = gpx_name(gps_file, dry_run)?;
 
     let suffix = gps_file.extension().and_then(|s| s.to_str()).unwrap_or("");
 
     if suffix == "gpx" {
         if gps_file != dest {
             println!("{:?} -> {:?}", gps_file, dest);
-            fs::rename(gps_file, &dest)?;
+            if !dry_run {
+                fs::rename(gps_file, &dest)?;
+            }
         }
     } else if suffix == "tcx" {
         run(
@@ -227,6 +293,8 @@ fn ensure_gpx(gps_file: &Path) -> Result<PathBuf> {
                 "-F",
                 dest.to_str().context("Path not UTF-8")?,
             ],
+            &[],
+            dry_run,
         )?;
     } else {
         return Err(anyhow::anyhow!("Unknown format {:?}", suffix));
@@ -235,9 +303,9 @@ fn ensure_gpx(gps_file: &Path) -> Result<PathBuf> {
     Ok(dest)
 }
 
-fn merge_gpx(gpx_files: &[PathBuf], output_dir: &Path) -> Result<PathBuf> {
+fn merge_gpx(gpx_files: &[PathBuf], output_dir: &Path, dry_run: bool) -> Result<PathBuf> {
     let dest = output_dir.join("all_activities.gpx");
-    if dest.exists() {
+    if !dry_run && dest.exists() {
         let _ = fs::remove_file(&dest);
     }
 
@@ -262,7 +330,7 @@ fn merge_gpx(gpx_files: &[PathBuf], output_dir: &Path) -> Result<PathBuf> {
     let dest_str = dest.to_string_lossy().to_string();
     cmd_args.push(&dest_str);
 
-    run("gpsbabel", &cmd_args)?;
+    run("gpsbabel", &cmd_args, &[], dry_run)?;
 
     Ok(dest)
 }
@@ -280,13 +348,16 @@ fn geotag_images_dir(config: &AppConfig, gpx: &Path, dir: &Path) -> Result<()> {
             "--time-range",
             &config.timerange.to_string(),
         ],
+        &[],
+        config.dry_run,
     )
 }
 
-fn clean(files: &[PathBuf]) -> Result<()> {
+fn clean(files: &[PathBuf], dry_run: bool) -> Result<()> {
+    if dry_run {
+        return Ok(());
+    }
     for path in files {
-        // Construct potential original file name
-        // Exiftool usually creates "filename.ext_original"
         let mut original = path.clone();
         if let Some(name) = path.file_name() {
             let mut name_str = name.to_string_lossy().into_owned();
@@ -301,18 +372,112 @@ fn clean(files: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
+fn parse_offset(s: &str) -> Result<i32> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(anyhow::anyhow!("Empty offset"));
+    }
+    let sign = if s.starts_with('-') { -1 } else { 1 };
+    let s = s.trim_start_matches('+').trim_start_matches('-');
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() < 2 {
+        return Err(anyhow::anyhow!("Invalid offset format: {}", s));
+    }
+    let h: i32 = parts[0].parse()?;
+    let m: i32 = parts[1].parse()?;
+    Ok(sign * (h * 60 + m))
+}
+
+fn format_offset(mins: i32) -> String {
+    let sign = if mins >= 0 { "+" } else { "-" };
+    let abs_mins = mins.abs();
+    let h = abs_mins / 60;
+    let m = abs_mins % 60;
+    format!("{}{:02}:{:02}", sign, h, m)
+}
+
+fn get_image_offset(file: &Path) -> Result<String> {
+    let args = &[
+        "-G1",
+        "-a",
+        "-s",
+        "-DateTimeOriginal",
+        "-DaylightSavings",
+        "-TimeZone",
+        "-OffsetTimeOriginal",
+        file.to_str().unwrap(),
+    ];
+    println!("Running: exiftool {}", args.join(" "));
+    let output = run_capture("exiftool", args)?;
+
+    let mut dst_on = false;
+    let mut offset_time_orig: Option<String> = None;
+    let mut timezone_val: Option<String> = None;
+
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Line format: [Group] Tag : Value
+        // We look for the tag name part.
+        // Split by ':'
+        if let Some((key_part, value_part)) = line.split_once(':') {
+            let key = key_part.trim(); // e.g. "[ExifIFD] OffsetTimeOriginal"
+            let value = value_part.trim();
+
+            // Extract Tag name from [Group] Tag
+            let tag = if let Some((_, t)) = key.rsplit_once(' ') {
+                t
+            } else {
+                key // fallback if no group?
+            };
+
+            match tag {
+                "DaylightSavings" => {
+                    if value == "On" {
+                        dst_on = true;
+                    }
+                }
+                "OffsetTimeOriginal" => {
+                    offset_time_orig = Some(value.to_string());
+                }
+                "TimeZone" => {
+                    timezone_val = Some(value.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if let Some(oto) = offset_time_orig {
+        // If OffsetTimeOriginal exists, use it directly.
+        // Usually it includes DST if applicable.
+        return Ok(oto);
+    }
+
+    if let Some(tz) = timezone_val {
+        // Fallback to TimeZone.
+        // Adjust for DST if needed.
+        let mut mins = parse_offset(&tz)?;
+        if dst_on {
+            mins += 60;
+        }
+        return Ok(format_offset(mins));
+    }
+
+    Err(anyhow::anyhow!("No offset found in {:?}", file))
+}
+
 // --- Commands ---
 
-fn cmd_organize(dir: Option<&PathBuf>) -> Result<()> {
+fn cmd_organize(config: &AppConfig, dir: Option<&PathBuf>) -> Result<()> {
     let default_path = PathBuf::from(".");
     let target_dir = dir.unwrap_or(&default_path);
 
-    // Change to target directory so that folders are created relative to it
     std::env::set_current_dir(target_dir)
         .with_context(|| format!("Failed to change directory to {:?}", target_dir))?;
 
-    // exiftool -d "%Y-%m-%d" "-Directory<DateTimeOriginal" -ext jpg -ext JPG .
-    // This moves files into subdirectories named by date.
     let args = vec![
         "-d",
         "%Y-%m-%d",
@@ -324,7 +489,27 @@ fn cmd_organize(dir: Option<&PathBuf>) -> Result<()> {
         ".",
     ];
 
-    run("exiftool", &args)?;
+    run("exiftool", &args, &[], config.dry_run)?;
+    Ok(())
+}
+
+fn organize_files(config: &AppConfig, files: &[PathBuf]) -> Result<()> {
+    if files.is_empty() {
+        return Ok(());
+    }
+
+    // Move files to CWD/YYYY-MM-DD/
+    // We assume CWD is the target root.
+
+    let args = vec!["-d", "%Y-%m-%d", "-Directory<DateTimeOriginal"];
+
+    let file_strs: Vec<String> = files
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    let file_refs: Vec<&str> = file_strs.iter().map(|s| s.as_str()).collect();
+
+    run("exiftool", &args, &file_refs, config.dry_run)?;
     Ok(())
 }
 
@@ -345,15 +530,20 @@ fn fix_extensions(config: &AppConfig, files: &[PathBuf]) -> Result<Vec<PathBuf>>
 
             if path != new_path {
                 println!("Renaming extension {:?} -> {:?}", path, new_path);
-                if let Err(e) = fs::rename(&path, &new_path) {
-                    eprintln!("Failed to rename {:?}: {}", path, e);
-                    if new_path.exists() {
-                        resolved.push(new_path);
+                if !config.dry_run {
+                    if let Err(e) = fs::rename(&path, &new_path) {
+                        eprintln!("Failed to rename {:?}: {}", path, e);
+                        if new_path.exists() {
+                            resolved.push(new_path);
+                        } else {
+                            resolved.push(path);
+                        }
                     } else {
-                        resolved.push(path);
+                        resolved.push(new_path);
                     }
                 } else {
-                    resolved.push(new_path);
+                    println!("DRY-RUN: Rename {:?} to {:?}", path, new_path);
+                    resolved.push(new_path); // assume successful for dry-run flow logic?
                 }
             } else {
                 resolved.push(path);
@@ -368,45 +558,24 @@ fn fix_extensions(config: &AppConfig, files: &[PathBuf]) -> Result<Vec<PathBuf>>
 fn cmd_rename(config: &AppConfig, images: &[PathBuf]) -> Result<()> {
     let images = fix_extensions(config, images)?;
 
-    // chmod on all provided files
-    let mut args = vec!["chmod", "0644"];
     let img_strs: Vec<String> = images
         .iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
-    for img in &img_strs {
-        args.push(img);
-    }
-    // "find" logic replaced by explicit chmod on list?
-    // The original script ran `find ... -exec chmod ...`.
-    // We can just run `chmod` on the list.
-    // Note: If list is too long, might hit arg limit. But typical usage is likely fine.
-    // If not, we should iterate.
-    run("chmod", &args)?; // args[0] is program? No, run(program, args)
-                          // run("chmod", &["0644", file]) loop might be safer but slower.
-                          // Let's pass all at once.
-                          // Wait, run takes (program, &[&str]).
-                          // I need to adapt args vector.
-    let mut chmod_args = vec!["0644"];
-    for img in &img_strs {
-        chmod_args.push(img.as_str());
-    }
-    run("chmod", &chmod_args)?;
+    let img_refs: Vec<&str> = img_strs.iter().map(|s| s.as_str()).collect();
 
-    // exiftool rename
-    // exiftool -FileName<DateTimeOriginal -d ... -overwrite_original FILES...
-    let mut exif_args = vec![
+    run("chmod", &["0644"], &img_refs, config.dry_run)?;
+
+    let exif_opts = vec![
         "-FileName<DateTimeOriginal",
         "-d",
         "%Y-%m-%d %H.%M.%S%%-c.%%e",
         "-overwrite_original",
     ];
-    for img in &img_strs {
-        exif_args.push(img.as_str());
-    }
-    run("exiftool", &exif_args)?;
 
-    clean(&images)?;
+    run("exiftool", &exif_opts, &img_refs, config.dry_run)?;
+
+    clean(&images, config.dry_run)?;
     Ok(())
 }
 
@@ -425,7 +594,7 @@ fn cmd_set_time(config: &AppConfig, images: &[PathBuf]) -> Result<()> {
     let offset_time_dig_arg = format!("-OffSetTimeDigitized={}", config.timezone);
     let daylight_arg = format!("-DaylightSavings#={}", dst);
 
-    let mut args = vec![
+    let args = vec![
         all_dates_arg.as_str(),
         timezone_arg.as_str(),
         timezone_city_arg.as_str(),
@@ -440,11 +609,9 @@ fn cmd_set_time(config: &AppConfig, images: &[PathBuf]) -> Result<()> {
         .iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
-    for img in &img_strs {
-        args.push(img.as_str());
-    }
+    let img_refs: Vec<&str> = img_strs.iter().map(|s| s.as_str()).collect();
 
-    run("exiftool", &args)?;
+    run("exiftool", &args, &img_refs, config.dry_run)?;
     Ok(())
 }
 
@@ -457,10 +624,9 @@ fn cmd_geotag(config: &AppConfig, gps_files: &[PathBuf], images: &[PathBuf]) -> 
 
     let mut gps_paths = Vec::new();
     for path in gps_files {
-        gps_paths.push(ensure_gpx(&path)?);
+        gps_paths.push(ensure_gpx(&path, config.dry_run)?);
     }
 
-    // We need to group images by directory because gpicsync works on directories
     let mut dirs: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
     for img in &images {
         if let Some(parent) = img.parent() {
@@ -470,35 +636,29 @@ fn cmd_geotag(config: &AppConfig, gps_files: &[PathBuf], images: &[PathBuf]) -> 
         }
     }
 
-    // For each directory, we merge GPX (outputting to that dir?) and run gpicsync
     for (dir, _) in dirs {
         println!("Processing directory: {:?}", dir);
 
         let gpx = if gps_paths.len() > 1 {
-            merge_gpx(&gps_paths, &dir)?
+            merge_gpx(&gps_paths, &dir, config.dry_run)?
         } else {
-            // Copy the single GPX to the dir if it's not there?
-            // Or just reference it.
-            // But merge_gpx creates "all_activities.gpx" in destination.
-            // Let's just use the first GPX path directly if single.
             gps_paths[0].clone()
         };
 
         geotag_images_dir(config, &gpx, &dir)?;
 
-        // If we created a temporary merged file, remove it
-        if gps_paths.len() > 1 && gpx.exists() {
+        if gps_paths.len() > 1 && gpx.exists() && !config.dry_run {
             if let Err(e) = fs::remove_file(&gpx) {
                 eprintln!("Failed to remove temporary gpx {:?}: {}", gpx, e);
             }
         }
     }
 
-    clean(&images)?;
+    clean(&images, config.dry_run)?;
     Ok(())
 }
 
-fn cmd_shift(_config: &AppConfig, reset_tz: bool, by: &str, images: &[PathBuf]) -> Result<()> {
+fn cmd_shift(config: &AppConfig, reset_tz: bool, by: &str, images: &[PathBuf]) -> Result<()> {
     let images = resolve_files(images)?;
     if by.is_empty() {
         return Err(anyhow::anyhow!("empty shift pattern"));
@@ -526,16 +686,14 @@ fn cmd_shift(_config: &AppConfig, reset_tz: bool, by: &str, images: &[PathBuf]) 
         .iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
-    for img in &img_strs {
-        args.push(img.as_str());
-    }
+    let img_refs: Vec<&str> = img_strs.iter().map(|s| s.as_str()).collect();
 
-    run("exiftool", &args)?;
+    run("exiftool", &args, &img_refs, config.dry_run)?;
     Ok(())
 }
 
 fn cmd_set_gps(
-    _config: &AppConfig,
+    config: &AppConfig,
     lat_ref: &str,
     long_ref: &str,
     lat: &str,
@@ -564,111 +722,153 @@ fn cmd_set_gps(
         r_log = r_log.trim_start_matches('-').to_string();
     }
 
-    let mut args = vec![
+    let args = [
         format!("-gpslatitude={}", r_lat),
         format!("-gpslongitude={}", r_log),
+        format!("-gpslatituderef={}", r_lat_ref),
+        format!("-gpslongituderef={}", r_log_ref),
     ];
 
-    if !r_lat_ref.is_empty() {
-        args.push(format!("-gpslatituderef={}", r_lat_ref));
-    }
-    if !r_log_ref.is_empty() {
-        args.push(format!("-gpslongituderef={}", r_log_ref));
-    }
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
-    let mut final_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let img_strs: Vec<String> = images
         .iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
-    for img in &img_strs {
-        final_args.push(img);
-    }
+    let img_refs: Vec<&str> = img_strs.iter().map(|s| s.as_str()).collect();
 
-    run("exiftool", &final_args)?;
-    clean(&images)?;
+    run("exiftool", &arg_refs, &img_refs, config.dry_run)?;
+    clean(&images, config.dry_run)?;
     Ok(())
 }
 
-fn cmd_process(config: &AppConfig, files: &[PathBuf]) -> Result<()> {
-    // Separate images and gpx
-    let mut images = Vec::new();
-    let mut gps_files = Vec::new();
+fn cmd_process(config: &AppConfig, dirs: &[PathBuf]) -> Result<()> {
+    // 1. Scan Input Directories
+    println!("Scanning input directories for images and GPX files...");
 
-    for path in files {
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        if ext == "gpx" || ext == "tcx" {
-            gps_files.push(path.clone());
-        } else {
-            images.push(path.clone());
+    // We group images by directory to handle offsets per directory
+    // We also collect all GPX files found.
+    // Note: GPX files found in inputs are collected for the "Geotag" step later.
+    let mut all_gps_files = Vec::new();
+    let mut dir_images_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+
+    for dir in dirs {
+        if !dir.exists() {
+            eprintln!("Warning: Directory {:?} does not exist, skipping.", dir);
+            continue;
+        }
+        let (images, gpx) = get_files_recursively(dir, config);
+        all_gps_files.extend(gpx);
+
+        // Group images by parent directory (or just the input dir?)
+        // The prompt says "for each directory we can assume all pictures have the same offset".
+        // This implies the input directory is the unit of assumption.
+        // However, if input dir is "Root" and it has "SubA", "SubB".
+        // Do we assume Root recursively has same offset? Yes, likely.
+        // So we associate all found images with the `dir` they came from.
+
+        if !images.is_empty() {
+            dir_images_map.insert(dir.clone(), images);
         }
     }
 
-    if images.is_empty() {
-        return Err(anyhow::anyhow!("No images provided"));
+    if dir_images_map.is_empty() {
+        println!("No images found.");
+        return Ok(());
     }
 
-    // 0. Ensure extensions are lowercase
-    // This updates the 'images' list with potentially new paths
-    let images = fix_extensions(config, &images)?;
+    // 2. Determine Offsets and Shift to UTC
+    for (dir, images) in &dir_images_map {
+        // Pick first image to read offset
+        if let Some(first_img) = images.first() {
+            let offset_str = get_image_offset(first_img)
+                .with_context(|| format!("Could not determine offset for directory {:?}", dir))?;
 
-    // Parse Timezone
-    let tz_str = &config.timezone; // e.g. "+01:00" or "-05:00"
-    let sign = &tz_str[0..1];
-    let h: i32 = tz_str[1..3].parse()?;
-    let m: i32 = tz_str[4..6].parse()?;
+            println!("Directory: {:?}, Detected Offset: {}", dir, offset_str);
+            // Parse offset
+            // format: +HH:MM or -HH:MM
+            let (sign, rest) = if offset_str.starts_with('+') || offset_str.starts_with('-') {
+                (&offset_str[0..1], &offset_str[1..])
+            } else {
+                ("+", offset_str.as_str())
+            };
 
-    let mut offset_mins = h * 60 + m;
-    if sign == "-" {
-        offset_mins = -offset_mins;
+            // Parse HH:MM
+            let parts: Vec<&str> = rest.split(':').collect();
+            if parts.len() < 2 {
+                eprintln!("Invalid offset format {}, skipping shift.", offset_str);
+                continue;
+            }
+
+            // To shift TO UTC:
+            // If Time is 12:00 +02:00. UTC is 10:00.
+            // We need to shift by -02:00.
+            // So we INVERT the detected offset.
+
+            // Construct shift string for cmd_shift
+            // cmd_shift takes "+HH:MM" or "-HH:MM" and shifts AllDates.
+            // If detected is "+02:00", we want "-02:00".
+            // If detected is "-05:00", we want "+05:00".
+
+            let shift_sign = if sign == "+" { "-" } else { "+" };
+            let shift_val = format!("{}{}:{}", shift_sign, parts[0], parts[1]);
+
+            println!("  -> Shifting to UTC by {}", shift_val);
+            cmd_shift(config, false, &shift_val, images)?;
+
+            // 3. Organize (Move to CWD)
+            println!("  -> Organizing (Moving to CWD)");
+            organize_files(config, images)?;
+        }
     }
 
-    // Apply DST to offset if needed
-    if config.timezone_dst {
-        offset_mins += 60;
+    // 4. Scan CWD for processing (Geotag, SetTime, Rename)
+    // Files have moved to ./YYYY-MM-DD/
+    // We scan CWD recursively.
+
+    if config.dry_run {
+        println!("---");
+        println!("Plan complete.");
+        println!("Subsequent steps (Geotag, SetTime, Rename) would run on organized files in current directory.");
+        println!("Run with --force to execute.");
+        return Ok(());
     }
 
-    // 1. Shift to UTC
-    // We want to remove the offset. So shift by -offset_mins.
-    let utc_shift_mins = -offset_mins;
+    // FORCE MODE: Scan and Process
+    let cwd = std::env::current_dir()?;
+    let (cwd_images, cwd_gpx) = get_files_recursively(&cwd, config);
 
-    let shift_sign = if utc_shift_mins >= 0 { "+" } else { "-" };
-    let abs_shift = utc_shift_mins.abs();
-    let sh = abs_shift / 60;
-    let sm = abs_shift % 60;
-    let shift_str = format!("{}{:02}:{:02}", shift_sign, sh, sm);
+    // Add any GPX found in input dirs (all_gps_files) to cwd_gpx?
+    // User might have GPX in input dirs that didn't move (Organize moves images only).
+    // So we should combine them.
+    let mut final_gps_files = all_gps_files;
+    final_gps_files.extend(cwd_gpx);
 
-    println!("Shifting images to UTC (Offset: {})", shift_str);
-    cmd_shift(config, false, &shift_str, &images)?;
+    // Deduplicate GPX
+    final_gps_files.sort();
+    final_gps_files.dedup();
 
-    // 2. Geotag
-    if !gps_files.is_empty() {
-        cmd_geotag(config, &gps_files, &images)?;
+    println!(
+        "Found {} images and {} GPX files in workspace.",
+        cwd_images.len(),
+        final_gps_files.len()
+    );
+
+    // 5. Geotag
+    if !final_gps_files.is_empty() {
+        cmd_geotag(config, &final_gps_files, &cwd_images)?;
     } else {
-        println!("No GPX files, skipping geotag.");
+        println!("No GPX files found, skipping geotag.");
     }
 
-    // 3. Set Time (and restore timezone)
-    // We need to construct a config that reflects the Total Offset (Base + DST)
-    // so that cmd_set_time shifts correctly and sets correct metadata.
-    let mut final_config = config.clone();
+    // 6. Set Time (UTC -> Target)
+    // We want to shift from UTC to config.timezone.
+    // existing cmd_set_time does this (AllDates += config.timezone).
+    println!("Setting time and timezone to {}", config.timezone);
+    cmd_set_time(config, &cwd_images)?;
 
-    // Format offset_mins back to string for config.timezone
-    let final_sign = if offset_mins >= 0 { "+" } else { "-" };
-    let final_abs = offset_mins.abs();
-    let fh = final_abs / 60;
-    let fm = final_abs % 60;
-    final_config.timezone = format!("{}{:02}:{:02}", final_sign, fh, fm);
-
-    println!("Setting time and timezone to {}", final_config.timezone);
-    cmd_set_time(&final_config, &images)?;
-
-    // 4. Rename
-    cmd_rename(config, &images)?;
+    // 7. Rename
+    cmd_rename(config, &cwd_images)?;
 
     Ok(())
 }
@@ -678,12 +878,18 @@ fn main() -> Result<()> {
 
     let (tz_id, tz_info) = get_tz_info(&cli.timezone)?;
 
+    let dry_run = match &cli.command {
+        Commands::Process { force, .. } => !*force,
+        _ => false,
+    };
+
     let config = AppConfig {
         suffixes: cli.suffix.iter().map(|s| s.to_lowercase()).collect(),
         timerange: cli.timerange,
         timezone: tz_info,
         timezone_dst: cli.dst,
         timezone_id: tz_id,
+        dry_run,
     };
 
     match &cli.command {
@@ -707,8 +913,8 @@ fn main() -> Result<()> {
             cmd_set_time(&config, images)?;
             cmd_rename(&config, images)?;
         }
-        Commands::Organize { dir } => cmd_organize(dir.as_ref())?,
-        Commands::Process { files } => cmd_process(&config, files)?,
+        Commands::Organize { dir } => cmd_organize(&config, dir.as_ref())?,
+        Commands::Process { dirs, .. } => cmd_process(&config, dirs)?,
     }
 
     Ok(())

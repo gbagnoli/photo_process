@@ -1,34 +1,27 @@
 # photo_process
 
-simple scripts -- more or less an evolution from a bash script running simple commands.
-Better if you just move on
+A tool to process photo collections: geotagging, time synchronization, renaming, and organization.
 
-## install
+## Prerequisites
 
-You will need to have
-[uv](https://github.com/astral-sh/uv?tab=readme-ov-file#installation) installed
+You need the following tools working and reachable in your `$PATH`:
 
-you also need, working and reachable in `$PATH`
+*   [ExifTool](https://exiftool.org/)
+*   [GPSBabel](https://www.gpsbabel.org/)
+*   [gpicsync](https://github.com/h4tr3d/gpicsync)
 
-* gpsbabel
-* gpicsync
-* exiftool
+## Build
 
-```
-$ uv venv
-$ uv sync
-$ source .venv/bin/activate
+```bash
+cargo build --release
 ```
 
-## run
+## Run
 
-make sure the pictures are in UTC.
-make sure your gpx file is also UTC
+The tool provides several commands. The `process` command is the most comprehensive:
 
-run
-
-```
-$ photo_process -z <timezone> -d /path/to/pics all /path/to/gpx/*.gpx
+```bash
+cargo run --release -- process -z <timezone> /path/to/pics
 ```
 
-this will geotag the pictures, shift times to the new timezone and rename the files.
+See `GEMINI.md` or run with `--help` for more details on available commands and options.
