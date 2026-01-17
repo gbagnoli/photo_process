@@ -84,16 +84,6 @@ enum Commands {
         by: String,
         images: Vec<PathBuf>,
     },
-    /// set GPS coordinates on images
-    SetGps {
-        #[arg(long, default_value = "N")]
-        latitude_ref: String,
-        #[arg(long, default_value = "E")]
-        longitude_ref: String,
-        lat: String,
-        log: String,
-        images: Vec<PathBuf>,
-    },
     /// Run all: geotag, set_time, rename
     All {
         #[arg(short = 'g', long, required = true)]
@@ -692,56 +682,6 @@ fn cmd_shift(config: &AppConfig, reset_tz: bool, by: &str, images: &[PathBuf]) -
     Ok(())
 }
 
-fn cmd_set_gps(
-    config: &AppConfig,
-    lat_ref: &str,
-    long_ref: &str,
-    lat: &str,
-    log: &str,
-    images: &[PathBuf],
-) -> Result<()> {
-    let images = resolve_files(images)?;
-
-    let _ = lat
-        .trim_end_matches(',')
-        .parse::<f64>()
-        .context("Invalid lat")?;
-    let _ = log.parse::<f64>().context("Invalid log")?;
-
-    let mut r_lat = lat.trim_end_matches(',').to_string();
-    let mut r_log = log.to_string();
-    let mut r_lat_ref = lat_ref.to_string();
-    let mut r_log_ref = long_ref.to_string();
-
-    if r_lat.starts_with('-') {
-        r_lat_ref = "S".to_string();
-        r_lat = r_lat.trim_start_matches('-').to_string();
-    }
-    if r_log.starts_with('-') {
-        r_log_ref = "W".to_string();
-        r_log = r_log.trim_start_matches('-').to_string();
-    }
-
-    let args = [
-        format!("-gpslatitude={}", r_lat),
-        format!("-gpslongitude={}", r_log),
-        format!("-gpslatituderef={}", r_lat_ref),
-        format!("-gpslongituderef={}", r_log_ref),
-    ];
-
-    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-
-    let img_strs: Vec<String> = images
-        .iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect();
-    let img_refs: Vec<&str> = img_strs.iter().map(|s| s.as_str()).collect();
-
-    run("exiftool", &arg_refs, &img_refs, config.dry_run)?;
-    clean(&images, config.dry_run)?;
-    Ok(())
-}
-
 fn cmd_process(config: &AppConfig, dirs: &[PathBuf]) -> Result<()> {
     // 1. Scan Input Directories
     println!("Scanning input directories for images and GPX files...");
@@ -901,13 +841,6 @@ fn main() -> Result<()> {
             by,
             images,
         } => cmd_shift(&config, *reset_tz, by, images)?,
-        Commands::SetGps {
-            latitude_ref,
-            longitude_ref,
-            lat,
-            log,
-            images,
-        } => cmd_set_gps(&config, latitude_ref, longitude_ref, lat, log, images)?,
         Commands::All { gps_files, images } => {
             cmd_geotag(&config, gps_files, images)?;
             cmd_set_time(&config, images)?;
