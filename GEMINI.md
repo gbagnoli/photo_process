@@ -45,6 +45,7 @@ cargo run --release -- process -z Dublin /path/to/photos
 *   **Rust Workflow**: After any changes to the code, you **must** run the following commands to ensure code quality, style adherence, and successful compilation:
     ```bash
     cargo fmt
+    cargo test
     cargo check
     cargo clippy
     cargo build
