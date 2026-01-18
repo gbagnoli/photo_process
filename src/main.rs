@@ -142,6 +142,7 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         force: bool,
         /// Directories to process
+        #[arg(required = true)]
         dirs: Vec<PathBuf>,
         #[arg(short = 'z', long, required = true)]
         timezone: String,
@@ -589,26 +590,6 @@ fn cmd_organize(config: &AppConfig, dirs: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-fn organize_files(config: &AppConfig, files: &[PathBuf]) -> Result<()> {
-    if files.is_empty() {
-        return Ok(());
-    }
-
-    // Move files to CWD/YYYY-MM-DD/
-    // We assume CWD is the target root.
-
-    let args = vec!["-d", "%Y-%m-%d", "-Directory<DateTimeOriginal"];
-
-    let file_strs: Vec<String> = files
-        .iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect();
-    let file_refs: Vec<&str> = file_strs.iter().map(|s| s.as_str()).collect();
-
-    run("exiftool", &args, &file_refs, config.dry_run)?;
-    Ok(())
-}
-
 fn fix_extensions(config: &AppConfig, files: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut resolved = Vec::new();
     let files = resolve_files(files)?;
@@ -945,27 +926,15 @@ fn cmd_process(
         return Ok(());
     }
 
-    let mut all_gps_files = Vec::new();
     let mut dir_images_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-    let mut detected_offsets = Vec::new();
 
     for (path, res) in &results {
-        all_gps_files.extend(get_files_recursively(path, config).1);
         dir_images_map.insert(path.clone(), res.images.clone());
-
-        if let Ok((offset, _)) = &res.offset {
-            if !detected_offsets.contains(offset) {
-                detected_offsets.push(offset.clone());
-            }
-        }
     }
 
-    // 2. Determine final timezone
-    // (Already determined and passed as arguments)
-
-    // 3. Shift to UTC
+    // 2. Shift to UTC
     for (path, res) in results {
-        let (offset_str, dst) = match res.offset {
+        let (offset_str, dst_found) = match res.offset {
             Ok(o) => o,
             Err(e) => {
                 eprintln!(
@@ -983,7 +952,7 @@ fn cmd_process(
             if path.is_dir() { "Directory" } else { "File" },
             path,
             offset_str,
-            if dst { "Yes" } else { "No" }
+            if dst_found { "Yes" } else { "No" }
         );
 
         let (sign, rest) = if offset_str.starts_with('+') || offset_str.starts_with('-') {
@@ -1004,60 +973,73 @@ fn cmd_process(
         cmd_shift(config, false, &shift_val, &res.images)?;
     }
 
-    // 4. Organize (Move to CWD)
-    for images in dir_images_map.values() {
-        println!("  -> Organizing (Moving to CWD)");
-        organize_files(config, images)?;
+    // 3. Organize
+    println!("  -> Organizing photos...");
+    cmd_organize(config, dirs)?;
+
+    // 4. Determine date range and download GPX
+    let mut min_date: Option<NaiveDate> = None;
+    let mut max_date: Option<NaiveDate> = None;
+
+    let date_re = regex::Regex::new(r"^\d{4}-\d{2}-\d{2}$")?;
+
+    for dir in dirs {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if date_re.is_match(&name) {
+                    if let Ok(date) = NaiveDate::parse_from_str(&name, "%Y-%m-%d") {
+                        if min_date.is_none() || date < min_date.unwrap() {
+                            min_date = Some(date);
+                        }
+                        if max_date.is_none() || date > max_date.unwrap() {
+                            max_date = Some(date);
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    // 5. Prepare for subsequent steps
-    let (processing_images, processing_gpx) = if config.dry_run {
-        println!("---");
-        println!("Dry-run: Simulating Geotag, SetTime, Rename on detected files...");
+    if let (Some(start), Some(end)) = (min_date, max_date) {
+        let start_str = start.format("%Y-%m-%d").to_string();
+        let end_str = end.format("%Y-%m-%d").to_string();
+        println!("  -> Detected date range: {} to {}", start_str, end_str);
 
-        let mut imgs = Vec::new();
-        for list in dir_images_map.values() {
-            imgs.extend(list.clone());
+        for dir in dirs {
+            println!("  -> Downloading GPX files to {:?}", dir);
+            cmd_download_gpx(config, dir, Some(&start_str), Some(&end_str))?;
         }
+    }
 
-        let cwd = std::env::current_dir()?;
-        let (_, cwd_gpx) = get_files_recursively(&cwd, config);
+    // 5. Re-scan for processing (images and downloaded GPX)
+    let mut all_images = Vec::new();
+    let mut all_gpx = Vec::new();
 
-        (imgs, cwd_gpx)
-    } else {
-        let cwd = std::env::current_dir()?;
-        get_files_recursively(&cwd, config)
-    };
+    for dir in dirs {
+        let (imgs, gpxs) = get_files_recursively(dir, config);
+        all_images.extend(imgs);
+        all_gpx.extend(gpxs);
+    }
 
-    let mut final_gps_files = all_gps_files;
-    final_gps_files.extend(processing_gpx);
-    final_gps_files.sort();
-    final_gps_files.dedup();
-
-    println!(
-        "{} {} images and {} GPX files.",
-        if config.dry_run {
-            "Dry-run: Processing"
-        } else {
-            "Found"
-        },
-        processing_images.len(),
-        final_gps_files.len()
-    );
+    if all_images.is_empty() {
+        println!("No images found after organization, finishing.");
+        return Ok(());
+    }
 
     // 6. Geotag
-    if !final_gps_files.is_empty() {
-        cmd_geotag(config, &final_gps_files, &processing_images)?;
+    if !all_gpx.is_empty() {
+        cmd_geotag(config, &all_gpx, &all_images)?;
     } else {
         println!("No GPX files found, skipping geotag.");
     }
 
     // 7. Set Time (UTC -> Target)
     println!("Setting time and timezone to {}", timezone);
-    cmd_set_time(config, &processing_images, true, timezone, timezone_id, dst)?;
+    cmd_set_time(config, &all_images, true, timezone, timezone_id, dst)?;
 
     // 8. Rename
-    cmd_rename(config, &processing_images)?;
+    cmd_rename(config, &all_images)?;
 
     Ok(())
 }
