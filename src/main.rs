@@ -66,10 +66,6 @@ const TZ_CITIES_DATA: &[(&str, i32, &str)] = &[
 struct AppConfig {
     suffixes: Vec<String>,
     timerange: u64,
-    timezone: String,
-    timezone_dst: bool,
-    timezone_id: i32,
-    timezone_provided: bool,
     dry_run: bool,
 }
 
@@ -79,12 +75,6 @@ struct AppConfig {
 #[command(name = "photo_process")]
 #[command(about = "simple scripts to process photos")]
 struct Cli {
-    #[arg(short = 'z', long)]
-    timezone: Option<String>,
-
-    #[arg(long, default_value_t = false)]
-    dst: bool,
-
     #[arg(long, default_value_t = 10)]
     timerange: u64,
 
@@ -106,6 +96,10 @@ enum Commands {
     SetTime {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
+        #[arg(short = 'z', long, required = true)]
+        timezone: String,
+        #[arg(long, default_value_t = false)]
+        dst: bool,
     },
     /// geotag images using gpx files
     Geotag {
@@ -142,6 +136,10 @@ enum Commands {
         force: bool,
         /// Directories to process
         dirs: Vec<PathBuf>,
+        #[arg(short = 'z', long, required = true)]
+        timezone: String,
+        #[arg(long, default_value_t = false)]
+        dst: bool,
     },
 }
 
@@ -626,34 +624,39 @@ fn cmd_rename(config: &AppConfig, paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-fn cmd_set_time(config: &AppConfig, paths: &[PathBuf], set_gps: bool) -> Result<()> {
+fn cmd_set_time(
+    config: &AppConfig,
+    paths: &[PathBuf],
+    _set_gps: bool,
+    timezone: &str,
+    timezone_id: i32,
+    dst: bool,
+) -> Result<()> {
     let images = get_all_images_from_paths(config, paths);
     let images = resolve_files(&images)?;
 
-    let dst = if !config.timezone_dst { 0 } else { 60 };
-    let direction = &config.timezone[0..1];
-    let shift = &config.timezone[1..];
+    let dst_val = if !dst { 0 } else { 60 };
+    let direction = &timezone[0..1];
+    let shift = &timezone[1..];
 
     let all_dates_arg = format!("-AllDates{}=0:0:0 {}:0", direction, shift);
-    let timezone_arg = format!("-TimeZone={}", config.timezone);
-    let timezone_city_arg = format!("-TimeZoneCity#={}", config.timezone_id);
-    let offset_time_arg = format!("-OffSetTime={}", config.timezone);
-    let offset_time_orig_arg = format!("-OffSetTimeOriginal={}", config.timezone);
-    let offset_time_dig_arg = format!("-OffSetTimeDigitized={}", config.timezone);
-    let daylight_arg = format!("-DaylightSavings#={}", dst);
+    let timezone_arg = format!("-TimeZone={}", timezone);
+    let timezone_city_arg = format!("-TimeZoneCity#={}", timezone_id);
+    let offset_time_arg = format!("-OffSetTime={}", timezone);
+    let offset_time_orig_arg = format!("-OffSetTimeOriginal={}", timezone);
+    let offset_time_dig_arg = format!("-OffSetTimeDigitized={}", timezone);
+    let daylight_arg = format!("-DaylightSavings#={}", dst_val);
 
-    let mut args = Vec::new();
-    if set_gps {
-        args.push("-GPSDateTime<DateTimeOriginal");
-    }
-    args.push(all_dates_arg.as_str());
-    args.push(timezone_arg.as_str());
-    args.push(timezone_city_arg.as_str());
-    args.push(offset_time_arg.as_str());
-    args.push(offset_time_orig_arg.as_str());
-    args.push(offset_time_dig_arg.as_str());
-    args.push(daylight_arg.as_str());
-    args.push("-overwrite_original");
+    let args = vec![
+        all_dates_arg.as_str(),
+        timezone_arg.as_str(),
+        timezone_city_arg.as_str(),
+        offset_time_arg.as_str(),
+        offset_time_orig_arg.as_str(),
+        offset_time_dig_arg.as_str(),
+        daylight_arg.as_str(),
+        "-overwrite_original",
+    ];
 
     let img_strs: Vec<String> = images
         .iter()
@@ -876,7 +879,13 @@ fn cmd_shift_to_utc(config: &AppConfig, paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-fn cmd_process(config: &AppConfig, dirs: &[PathBuf]) -> Result<()> {
+fn cmd_process(
+    config: &AppConfig,
+    dirs: &[PathBuf],
+    timezone: &str,
+    timezone_id: i32,
+    dst: bool,
+) -> Result<()> {
     // 1. Scan and Detect Timezones
     println!("Scanning input directories for images and GPX files...");
     let results = detect_timezones(config, dirs);
@@ -902,23 +911,7 @@ fn cmd_process(config: &AppConfig, dirs: &[PathBuf]) -> Result<()> {
     }
 
     // 2. Determine final timezone
-    let mut final_config = config.clone();
-    if !config.timezone_provided {
-        if let Some(offset) = detected_offsets.first() {
-            let cities = get_cities_by_offset(offset);
-            if let Some(city) = cities.first() {
-                println!("Using detected timezone: {} ({})", city, offset);
-                let (id, info) = get_tz_info(city)?;
-                final_config.timezone = info;
-                final_config.timezone_id = id;
-            } else {
-                println!(
-                    "Warning: No city found for offset {}, using default",
-                    offset
-                );
-            }
-        }
-    }
+    // (Already determined and passed as arguments)
 
     // 3. Shift to UTC
     for (path, res) in results {
@@ -1004,26 +997,23 @@ fn cmd_process(config: &AppConfig, dirs: &[PathBuf]) -> Result<()> {
 
     // 6. Geotag
     if !final_gps_files.is_empty() {
-        cmd_geotag(&final_config, &final_gps_files, &processing_images)?;
+        cmd_geotag(config, &final_gps_files, &processing_images)?;
     } else {
         println!("No GPX files found, skipping geotag.");
     }
 
     // 7. Set Time (UTC -> Target)
-    println!("Setting time and timezone to {}", final_config.timezone);
-    cmd_set_time(&final_config, &processing_images, true)?;
+    println!("Setting time and timezone to {}", timezone);
+    cmd_set_time(config, &processing_images, true, timezone, timezone_id, dst)?;
 
     // 8. Rename
-    cmd_rename(&final_config, &processing_images)?;
+    cmd_rename(config, &processing_images)?;
 
     Ok(())
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-
-    let tz_name = cli.timezone.clone().unwrap_or_else(|| "Dublin".to_string());
-    let (tz_id, tz_info) = get_tz_info(&tz_name)?;
 
     let dry_run = match &cli.command {
         Commands::Process { force, .. } => !*force,
@@ -1033,16 +1023,19 @@ fn main() -> Result<()> {
     let config = AppConfig {
         suffixes: cli.suffix.iter().map(|s| s.to_lowercase()).collect(),
         timerange: cli.timerange,
-        timezone: tz_info,
-        timezone_dst: cli.dst,
-        timezone_id: tz_id,
-        timezone_provided: cli.timezone.is_some(),
         dry_run,
     };
 
     match &cli.command {
         Commands::Rename { paths } => cmd_rename(&config, paths)?,
-        Commands::SetTime { paths } => cmd_set_time(&config, paths, false)?,
+        Commands::SetTime {
+            paths,
+            timezone,
+            dst,
+        } => {
+            let (tz_id, tz_info) = get_tz_info(timezone)?;
+            cmd_set_time(&config, paths, false, &tz_info, tz_id, *dst)?
+        }
         Commands::Geotag { gps_files, paths } => cmd_geotag(&config, gps_files, paths)?,
         Commands::Shift {
             reset_tz,
@@ -1052,7 +1045,15 @@ fn main() -> Result<()> {
         Commands::ShiftToUtc { paths } => cmd_shift_to_utc(&config, paths)?,
         Commands::DetectTimezone { paths } => cmd_detect_timezone(&config, paths)?,
         Commands::Organize { dir } => cmd_organize(&config, dir.as_ref())?,
-        Commands::Process { dirs, .. } => cmd_process(&config, dirs)?,
+        Commands::Process {
+            dirs,
+            timezone,
+            dst,
+            ..
+        } => {
+            let (tz_id, tz_info) = get_tz_info(timezone)?;
+            cmd_process(&config, dirs, &tz_info, tz_id, *dst)?
+        }
     }
 
     Ok(())
