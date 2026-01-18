@@ -24,6 +24,17 @@ pub fn cmd_download_gpx(
         format!("Downloading activities from {} to {}", start, end).bold()
     );
 
+    // Check if logged in
+    let auth_status = run_capture("garmin", &["auth", "status"])?;
+    if !auth_status.contains("Status: Logged in") {
+        let msg = "You are not logged in to Garmin. Please run 'garmin auth login' first.";
+        if config.dry_run {
+            println!("{}", msg.truecolor(255, 100, 100)); // Light red
+        } else {
+            return Err(anyhow::anyhow!(msg));
+        }
+    }
+
     if !dest.exists() {
         std::fs::create_dir_all(dest)?;
     }
