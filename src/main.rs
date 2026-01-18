@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::{Duration, Local, NaiveDate};
 use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::fs;
@@ -146,6 +147,18 @@ enum Commands {
         timezone: String,
         #[arg(long, default_value_t = false)]
         dst: bool,
+    },
+    /// Download GPX files from Garmin
+    DownloadGpx {
+        /// Destination directory
+        #[arg(required = true)]
+        dest: PathBuf,
+        /// Start date (YYYY-MM-DD), defaults to 20 days ago
+        #[arg(long)]
+        start_date: Option<String>,
+        /// End date (YYYY-MM-DD), defaults to today
+        #[arg(long)]
+        end_date: Option<String>,
     },
 }
 
@@ -1049,6 +1062,113 @@ fn cmd_process(
     Ok(())
 }
 
+fn cmd_download_gpx(
+    _config: &AppConfig,
+    dest: &Path,
+    start_date: Option<&String>,
+    end_date: Option<&String>,
+) -> Result<()> {
+    let end = match end_date {
+        Some(s) => NaiveDate::parse_from_str(s, "%Y-%m-%d")?,
+        None => Local::now().date_naive(),
+    };
+    let start = match start_date {
+        Some(s) => NaiveDate::parse_from_str(s, "%Y-%m-%d")?,
+        None => end - Duration::days(20),
+    };
+
+    println!("Downloading activities from {} to {}", start, end);
+
+    if !dest.exists() {
+        fs::create_dir_all(dest)?;
+    }
+
+    let mut offset = 0;
+    let limit = 100;
+
+    loop {
+        let offset_str = offset.to_string();
+        let limit_str = limit.to_string();
+        let output = run_capture(
+            "garmin",
+            &[
+                "activities",
+                "list",
+                "--limit",
+                &limit_str,
+                "--start",
+                &offset_str,
+            ],
+        )?;
+
+        let mut found_any = false;
+        let mut all_older = true;
+
+        for line in output.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("ID") || line.starts_with('-') {
+                continue;
+            }
+
+            // Split by whitespace
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 2 {
+                continue;
+            }
+
+            found_any = true;
+            let activity_id = parts[0];
+            let activity_date_str = parts[1];
+
+            let activity_date = match NaiveDate::parse_from_str(activity_date_str, "%Y-%m-%d") {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            if activity_date < start {
+                continue;
+            }
+
+            all_older = false;
+
+            if activity_date <= end {
+                let gpx_filename = format!("{}.gpx", activity_id);
+                let gpx_path = dest.join(gpx_filename);
+
+                if gpx_path.exists() {
+                    println!("Activity {} already downloaded, skipping.", activity_id);
+                    continue;
+                }
+
+                println!("Downloading activity {} ({})...", activity_id, activity_date_str);
+                let gpx_path_str = gpx_path.to_string_lossy().to_string();
+
+                run(
+                    "garmin",
+                    &[
+                        "activities",
+                        "download",
+                        "-t",
+                        "gpx",
+                        "-o",
+                        &gpx_path_str,
+                        activity_id,
+                    ],
+                    &[],
+                    false,
+                )?;
+            }
+        }
+
+        if !found_any || all_older {
+            break;
+        }
+        offset += limit;
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -1090,6 +1210,13 @@ fn main() -> Result<()> {
         } => {
             let (tz_id, tz_info) = get_tz_info(timezone)?;
             cmd_process(&config, dirs, &tz_info, tz_id, *dst)?
+        }
+        Commands::DownloadGpx {
+            dest,
+            start_date,
+            end_date,
+        } => {
+            cmd_download_gpx(&config, dest, start_date.as_ref(), end_date.as_ref())?;
         }
     }
 

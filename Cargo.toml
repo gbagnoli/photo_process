@@ -10,5 +10,5 @@ chrono = "0.4"
 glob = "0.3"
 gpx = "0.8.5"
 walkdir = "2"
-xml-rs = "0.8" # gpx depends on it, might need it for custom parsing if gpx crate falls short
+xml-rs = "0.8"
 regex = "1"
