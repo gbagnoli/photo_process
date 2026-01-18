@@ -78,7 +78,12 @@ struct Cli {
     #[arg(long, default_value_t = 10)]
     timerange: u64,
 
-    #[arg(short = 'e', long, default_value = "jpg,mp4", value_delimiter = ',')]
+    #[arg(
+        short = 'e',
+        long,
+        default_value = "jpg,JPG,mp4",
+        value_delimiter = ','
+    )]
     suffix: Vec<String>,
 
     #[command(subcommand)]
@@ -127,8 +132,9 @@ enum Commands {
     },
     /// Organize photos into directories by date (YYYY-MM-DD)
     Organize {
-        /// Directory to organize (defaults to current directory)
-        dir: Option<PathBuf>,
+        /// Directories to organize
+        #[arg(required = true)]
+        dirs: Vec<PathBuf>,
     },
     /// Process photos: Shift to UTC, Organize, Geotag, Set Time (with DST), Rename
     Process {
@@ -418,6 +424,28 @@ fn clean(files: &[PathBuf], dry_run: bool) -> Result<()> {
     Ok(())
 }
 
+fn remove_empty_dirs_recursive(dir: &Path, dry_run: bool) -> Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            remove_empty_dirs_recursive(&path, dry_run)?;
+            if fs::read_dir(&path)?.next().is_none() {
+                if dry_run {
+                    println!("DRY-RUN: Removing empty directory: {:?}", path);
+                } else {
+                    println!("Removing empty directory: {:?}", path);
+                    fs::remove_dir(&path)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn parse_offset(s: &str) -> Result<i32> {
     let s = s.trim();
     if s.is_empty() {
@@ -517,25 +545,34 @@ fn get_image_offset(file: &Path) -> Result<(String, bool)> {
 
 // --- Commands ---
 
-fn cmd_organize(config: &AppConfig, dir: Option<&PathBuf>) -> Result<()> {
-    let default_path = PathBuf::from(".");
-    let target_dir = dir.unwrap_or(&default_path);
+fn cmd_organize(config: &AppConfig, dirs: &[PathBuf]) -> Result<()> {
+    for dir in dirs {
+        if !dir.exists() {
+            return Err(anyhow::anyhow!("Directory does not exist: {:?}", dir));
+        }
+        let (images, _) = get_files_recursively(dir, config);
+        if images.is_empty() {
+            println!("No images found in {:?}", dir);
+            continue;
+        }
 
-    std::env::set_current_dir(target_dir)
-        .with_context(|| format!("Failed to change directory to {:?}", target_dir))?;
+        let abs_dir = fs::canonicalize(dir)?;
+        let abs_dir_str = abs_dir.to_str().context("Path not UTF-8")?;
 
-    let args = vec![
-        "-d",
-        "%Y-%m-%d",
-        "-Directory<DateTimeOriginal",
-        "-ext",
-        "jpg",
-        "-ext",
-        "JPG",
-        ".",
-    ];
+        // We want to move every image under `dir` to `dir/YYYY-MM-DD/`
+        let dir_target = format!("-Directory<{}/$DateTimeOriginal", abs_dir_str);
+        let args = vec!["-d", "%Y-%m-%d", &dir_target];
 
-    run("exiftool", &args, &[], config.dry_run)?;
+        let file_strs: Vec<String> = images
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        let file_refs: Vec<&str> = file_strs.iter().map(|s| s.as_str()).collect();
+
+        run("exiftool", &args, &file_refs, config.dry_run)?;
+
+        remove_empty_dirs_recursive(dir, config.dry_run)?;
+    }
     Ok(())
 }
 
@@ -1044,7 +1081,7 @@ fn main() -> Result<()> {
         } => cmd_shift(&config, *reset_tz, by, paths)?,
         Commands::ShiftToUtc { paths } => cmd_shift_to_utc(&config, paths)?,
         Commands::DetectTimezone { paths } => cmd_detect_timezone(&config, paths)?,
-        Commands::Organize { dir } => cmd_organize(&config, dir.as_ref())?,
+        Commands::Organize { dirs } => cmd_organize(&config, dirs)?,
         Commands::Process {
             dirs,
             timezone,
