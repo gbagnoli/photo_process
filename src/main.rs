@@ -148,6 +148,9 @@ enum Commands {
         timezone: String,
         #[arg(long, default_value_t = false)]
         dst: bool,
+        /// Run organization step
+        #[arg(long, default_value_t = false)]
+        organize: bool,
     },
     /// Download GPX files from Garmin
     DownloadGpx {
@@ -916,6 +919,7 @@ fn cmd_process(
     timezone: &str,
     timezone_id: i32,
     dst: bool,
+    organize: bool,
 ) -> Result<()> {
     // 1. Scan and Detect Timezones
     println!("Scanning input directories for images and GPX files...");
@@ -973,42 +977,43 @@ fn cmd_process(
         cmd_shift(config, false, &shift_val, &res.images)?;
     }
 
-    // 3. Organize
-    println!("  -> Organizing photos...");
-    cmd_organize(config, dirs)?;
+    // 3. Organize & Download GPX
+    if organize {
+        println!("  -> Organizing photos...");
+        cmd_organize(config, dirs)?;
 
-    // 4. Determine date range and download GPX
-    let mut min_date: Option<NaiveDate> = None;
-    let mut max_date: Option<NaiveDate> = None;
+        // Determine date range from organized folders
+        let mut min_date: Option<NaiveDate> = None;
+        let mut max_date: Option<NaiveDate> = None;
+        let date_re = regex::Regex::new(r"^\d{4}-\d{2}-\d{2}$")?;
 
-    let date_re = regex::Regex::new(r"^\d{4}-\d{2}-\d{2}$")?;
-
-    for dir in dirs {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if date_re.is_match(&name) {
-                    if let Ok(date) = NaiveDate::parse_from_str(&name, "%Y-%m-%d") {
-                        if min_date.is_none() || date < min_date.unwrap() {
-                            min_date = Some(date);
-                        }
-                        if max_date.is_none() || date > max_date.unwrap() {
-                            max_date = Some(date);
+        for dir in dirs {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if date_re.is_match(&name) {
+                        if let Ok(date) = NaiveDate::parse_from_str(&name, "%Y-%m-%d") {
+                            if min_date.is_none() || date < min_date.unwrap() {
+                                min_date = Some(date);
+                            }
+                            if max_date.is_none() || date > max_date.unwrap() {
+                                max_date = Some(date);
+                            }
                         }
                     }
                 }
             }
         }
-    }
 
-    if let (Some(start), Some(end)) = (min_date, max_date) {
-        let start_str = start.format("%Y-%m-%d").to_string();
-        let end_str = end.format("%Y-%m-%d").to_string();
-        println!("  -> Detected date range: {} to {}", start_str, end_str);
+        if let (Some(start), Some(end)) = (min_date, max_date) {
+            let start_str = start.format("%Y-%m-%d").to_string();
+            let end_str = end.format("%Y-%m-%d").to_string();
+            println!("  -> Detected date range: {} to {}", start_str, end_str);
 
-        for dir in dirs {
-            println!("  -> Downloading GPX files to {:?}", dir);
-            cmd_download_gpx(config, dir, Some(&start_str), Some(&end_str))?;
+            for dir in dirs {
+                println!("  -> Downloading GPX files to {:?}", dir);
+                cmd_download_gpx(config, dir, Some(&start_str), Some(&end_str))?;
+            }
         }
     }
 
@@ -1118,11 +1123,15 @@ fn cmd_download_gpx(
                 let gpx_path = dest.join(gpx_filename);
 
                 if gpx_path.exists() {
-                    println!("Activity {} already downloaded, skipping.", activity_id);
+                    println!("Activity {} already downloaded, checking name...", activity_id);
+                    let _ = ensure_gpx(&gpx_path, false)?;
                     continue;
                 }
 
-                println!("Downloading activity {} ({})...", activity_id, activity_date_str);
+                println!(
+                    "Downloading activity {} ({})...",
+                    activity_id, activity_date_str
+                );
                 let gpx_path_str = gpx_path.to_string_lossy().to_string();
 
                 run(
@@ -1139,6 +1148,9 @@ fn cmd_download_gpx(
                     &[],
                     false,
                 )?;
+
+                // Rename the downloaded GPX file using its track name and time
+                let _ = ensure_gpx(&gpx_path, false)?;
             }
         }
 
@@ -1146,6 +1158,12 @@ fn cmd_download_gpx(
             break;
         }
         offset += limit;
+    }
+
+    // After all downloads and renames, merge everything into all_activities.gpx
+    let (_, gpx_files) = get_files_recursively(dest, _config);
+    if !gpx_files.is_empty() {
+        let _ = merge_gpx(&gpx_files, dest, false)?;
     }
 
     Ok(())
@@ -1188,10 +1206,18 @@ fn main() -> Result<()> {
             dirs,
             timezone,
             dst,
+            organize,
             ..
         } => {
             let (tz_id, tz_info) = get_tz_info(timezone)?;
-            cmd_process(&config, dirs, &tz_info, tz_id, *dst)?
+            cmd_process(
+                &config,
+                dirs,
+                &tz_info,
+                tz_id,
+                *dst,
+                *organize,
+            )?
         }
         Commands::DownloadGpx {
             dest,
