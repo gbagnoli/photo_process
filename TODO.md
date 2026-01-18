@@ -1,9 +1,3 @@
-# features
-
-* add command to download GPX from garmin
-* latch command to download gpx into process and make it autodiscover the time
-  range
-
 # tests
 
 ## gpx merging

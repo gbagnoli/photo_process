@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use walkdir::WalkDir;
+use colored::Colorize;
 
 // --- Constants & Config ---
 
@@ -169,24 +170,22 @@ enum Commands {
 // --- Helpers ---
 
 fn run(program: &str, args: &[&str], files: &[&str], dry_run: bool) -> Result<()> {
-    let mut msg = if dry_run {
-        format!("DRY-RUN: {} {}", program, args.join(" "))
-    } else {
-        format!("Running: {} {}", program, args.join(" "))
-    };
+    let mut cmd_str = format!("{} {}", program, args.join(" "));
 
     if !files.is_empty() {
-        msg.push(' ');
-        msg.push_str(files[0]);
+        cmd_str.push(' ');
+        cmd_str.push_str(files[0]);
         if files.len() > 1 {
-            msg.push_str(&format!(" ... (and {} more files)", files.len() - 1));
+            cmd_str.push_str(&format!(" ... (and {} more files)", files.len() - 1));
         }
     }
-    println!("{}", msg.trim());
 
     if dry_run {
+        println!("{}", format!("DRY-RUN: {}", cmd_str).green());
         return Ok(());
     }
+
+    println!("{}", cmd_str.cyan().bold());
 
     let status = Command::new(program)
         .args(args)
@@ -342,6 +341,16 @@ fn gpx_name(gps_file: &Path, _dry_run: bool) -> Result<PathBuf> {
 }
 
 fn ensure_gpx(gps_file: &Path, dry_run: bool) -> Result<PathBuf> {
+    if !gps_file.exists() {
+        if dry_run {
+            println!(
+                "{}",
+                format!("DRY-RUN: Would rename {:?} based on track name", gps_file).green()
+            );
+            return Ok(gps_file.to_path_buf());
+        }
+        return Err(anyhow::anyhow!("File not found: {:?}", gps_file));
+    }
     let dest = gpx_name(gps_file, dry_run)?;
 
     let suffix = gps_file.extension().and_then(|s| s.to_str()).unwrap_or("");
@@ -725,7 +734,7 @@ fn cmd_geotag(config: &AppConfig, gps_files: &[PathBuf], paths: &[PathBuf]) -> R
     }
 
     for (dir, _) in dirs {
-        println!("Processing directory: {:?}", dir);
+        println!("  -> Processing directory: {:?}", dir);
 
         let gpx = if gps_paths.len() > 1 {
             merge_gpx(&gps_paths, &dir, config.dry_run)?
@@ -922,7 +931,7 @@ fn cmd_process(
     organize: bool,
 ) -> Result<()> {
     // 1. Scan and Detect Timezones
-    println!("Scanning input directories for images and GPX files...");
+    println!("{}", "Scanning input directories for images and GPX files...".bold());
     let results = detect_timezones(config, dirs);
 
     if results.is_empty() {
@@ -973,33 +982,35 @@ fn cmd_process(
         let shift_sign = if sign == "+" { "-" } else { "+" };
         let shift_val = format!("{}{}:{}", shift_sign, parts[0], parts[1]);
 
-        println!("  -> Shifting to UTC by {}", shift_val);
+        println!("Shifting to UTC by {}", shift_val);
         cmd_shift(config, false, &shift_val, &res.images)?;
     }
 
     // 3. Organize & Download GPX
+    let mut min_date: Option<NaiveDate> = None;
+    let mut max_date: Option<NaiveDate> = None;
+
     if organize {
-        println!("  -> Organizing photos...");
+        println!("{}", "Organizing photos...".bold());
         cmd_organize(config, dirs)?;
 
-        // Determine date range from organized folders
-        let mut min_date: Option<NaiveDate> = None;
-        let mut max_date: Option<NaiveDate> = None;
-        let date_re = regex::Regex::new(r"^\d{4}-\d{2}-\d{2}$")?;
-
+        // Determine date range from images metadata (works in dry-run too)
         for dir in dirs {
-            if let Ok(entries) = fs::read_dir(dir) {
-                for entry in entries.filter_map(|e| e.ok()) {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if date_re.is_match(&name) {
-                        if let Ok(date) = NaiveDate::parse_from_str(&name, "%Y-%m-%d") {
-                            if min_date.is_none() || date < min_date.unwrap() {
-                                min_date = Some(date);
-                            }
-                            if max_date.is_none() || date > max_date.unwrap() {
-                                max_date = Some(date);
-                            }
-                        }
+            let args = vec!["-T", "-d", "%Y-%m-%d", "-DateTimeOriginal", "-r"];
+            let dir_str = dir.to_string_lossy().to_string();
+            let output = run_capture("exiftool", &[args[0], args[1], args[2], args[3], args[4], &dir_str])?;
+            
+            for line in output.lines() {
+                let date_str = line.trim();
+                if date_str == "-" || date_str.is_empty() {
+                    continue;
+                }
+                if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                    if min_date.is_none() || date < min_date.unwrap() {
+                        min_date = Some(date);
+                    }
+                    if max_date.is_none() || date > max_date.unwrap() {
+                        max_date = Some(date);
                     }
                 }
             }
@@ -1008,10 +1019,10 @@ fn cmd_process(
         if let (Some(start), Some(end)) = (min_date, max_date) {
             let start_str = start.format("%Y-%m-%d").to_string();
             let end_str = end.format("%Y-%m-%d").to_string();
-            println!("  -> Detected date range: {} to {}", start_str, end_str);
+            println!("{}", format!("Detected date range: {} to {}", start_str, end_str).bold());
 
             for dir in dirs {
-                println!("  -> Downloading GPX files to {:?}", dir);
+                println!("{}", format!("Downloading GPX files to {:?}", dir).bold());
                 cmd_download_gpx(config, dir, Some(&start_str), Some(&end_str))?;
             }
         }
@@ -1035,12 +1046,14 @@ fn cmd_process(
     // 6. Geotag
     if !all_gpx.is_empty() {
         cmd_geotag(config, &all_gpx, &all_images)?;
+    } else if config.dry_run && organize && min_date.is_some() {
+        println!("{}", "DRY-RUN: Would geotag images using downloaded GPX files.".green());
     } else {
         println!("No GPX files found, skipping geotag.");
     }
 
     // 7. Set Time (UTC -> Target)
-    println!("Setting time and timezone to {}", timezone);
+    println!("{}", format!("Setting time and timezone to {}", timezone).bold());
     cmd_set_time(config, &all_images, true, timezone, timezone_id, dst)?;
 
     // 8. Rename
@@ -1064,7 +1077,7 @@ fn cmd_download_gpx(
         None => end - Duration::days(20),
     };
 
-    println!("Downloading activities from {} to {}", start, end);
+    println!("{}", format!("Downloading activities from {} to {}", start, end).bold());
 
     if !dest.exists() {
         fs::create_dir_all(dest)?;
@@ -1123,14 +1136,20 @@ fn cmd_download_gpx(
                 let gpx_path = dest.join(gpx_filename);
 
                 if gpx_path.exists() {
-                    println!("Activity {} already downloaded, checking name...", activity_id);
-                    let _ = ensure_gpx(&gpx_path, false)?;
+                    println!(
+                        "Activity {} already downloaded, checking name...{}",
+                        activity_id,
+                        if _config.dry_run { " (DRY-RUN)".green() } else { "".clear() }
+                    );
+                    let _ = ensure_gpx(&gpx_path, _config.dry_run)?;
                     continue;
                 }
 
                 println!(
-                    "Downloading activity {} ({})...",
-                    activity_id, activity_date_str
+                    "Downloading activity {} ({})...{}",
+                    activity_id,
+                    activity_date_str,
+                    if _config.dry_run { " (DRY-RUN)".green() } else { "".clear() }
                 );
                 let gpx_path_str = gpx_path.to_string_lossy().to_string();
 
@@ -1146,11 +1165,11 @@ fn cmd_download_gpx(
                         activity_id,
                     ],
                     &[],
-                    false,
+                    _config.dry_run,
                 )?;
 
                 // Rename the downloaded GPX file using its track name and time
-                let _ = ensure_gpx(&gpx_path, false)?;
+                let _ = ensure_gpx(&gpx_path, _config.dry_run)?;
             }
         }
 
@@ -1163,7 +1182,7 @@ fn cmd_download_gpx(
     // After all downloads and renames, merge everything into all_activities.gpx
     let (_, gpx_files) = get_files_recursively(dest, _config);
     if !gpx_files.is_empty() {
-        let _ = merge_gpx(&gpx_files, dest, false)?;
+        let _ = merge_gpx(&gpx_files, dest, _config.dry_run)?;
     }
 
     Ok(())
