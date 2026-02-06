@@ -195,7 +195,7 @@ pub fn gpx_name(gps_file: &Path, _dry_run: bool) -> Result<PathBuf> {
         if let Some(time) = metadata.time {
             if let Ok(iso) = time.format() {
                 if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&iso) {
-                    dt.format("%Y-%m-%d.%H:%M:%S").to_string()
+                    dt.format("%Y-%m-%d.%H.%M.%S").to_string()
                 } else {
                     "no_time".to_string()
                 }
