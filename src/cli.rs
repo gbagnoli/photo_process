@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "photo_process")]
+#[command(version = env!("BUILD_VERSION"))]
 #[command(about = "simple scripts to process photos")]
 pub struct Cli {
     #[arg(long, default_value_t = 10)]
