@@ -15,6 +15,7 @@ https://github.com/alchemy-fr/exiftool/blob/master/lib/Image/ExifTool/Canon.pm#L
 pub const TZ_CITIES_DATA: &[(&str, i32, &str)] = &[
     ("Adelaide", 5, "+09:30"),
     ("Anchorage", 31, "-09:00"),
+    ("Athens", 18, "+02:00"),
     ("Austin", 28, "-06:00"),
     ("Azores", 21, "-01:00"),
     ("Bangkok", 8, "+07:00"),
